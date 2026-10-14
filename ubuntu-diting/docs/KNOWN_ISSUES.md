@@ -1,6 +1,6 @@
 # Known issues and risks
 
-State as of 2026-10-14 (kernel 7.2.10-diting r38, device-xiaomi-diting 0.7.9,
+State as of 2026-10-14 (kernel 7.2.10-diting r40, device-xiaomi-diting 0.7.11,
 firmware-xiaomi-diting 0.9.2, diting-firmware-setup 0.1.0). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
@@ -51,7 +51,20 @@ in `docs/BRINGUP_STATUS.md`.
 - **Suspend efficiency**: suspend/resume works, but `qcom_stats` never shows
   CXSD/AOSD/DDR residency (counter layout on SM8475 unverified) and the drain
   test was inconclusive. While charging, ADSP glink notifications wake the phone
-  after a few seconds.
+  after a few seconds. On battery the modem's QMI indications (network
+  status) wake it every now and then (ftrace: ipcc/glink-smem as the first
+  interrupt after resume); in 60 s RTC tests it slept the full period in about
+  half of the cycles. ModemManager does not ask the modem to suppress them
+  while the screen is off (Android does).
+- **Fixed in device package 0.7.10/0.7.11**: calls had no audio since kernel
+  r30 (libadsprpc used the system dma-buf heap; the audio PD now uses the
+  fastrpc allocator); mobile data was lost after every suspend (ModemManager
+  removed the modem; now quick suspend/resume) and ModemManager 1.25.95
+  crashed re-creating the data link after a resume (local rebuild with the
+  upstream fix, pinned). Kernel r40 (patch 0085): the fastrpc driver lost
+  one DSP request per suspend (the freezer interrupted adsprpcd's listener
+  wait), so the first voice-graph opens after N suspends failed and calls
+  had no audio; owner-tested call after 3 suspends with audio.
 - **Speaker protection** runs: the CS35L41 protection firmware (Cirrus CSPL)
   with this unit's factory calibration from persist/audio/crus_calr.bin
   (top 5.90 ohm, bottom 7.12 ohm), set up by diting-speaker-protection at

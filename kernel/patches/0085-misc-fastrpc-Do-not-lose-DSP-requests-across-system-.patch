@@ -1,0 +1,52 @@
+From 54855e65aa33d6cba73cf066ea5d9ea37dc9401f Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 18:08:00 +0200
+Subject: [PATCH] misc: fastrpc: Do not lose DSP requests across system suspend
+
+A userspace FastRPC invoke waits with wait_for_completion_interruptible().
+When the system suspends, the freezer interrupts that wait; the invoke
+returns -ERESTARTSYS, its context stays queued on the DSP, and the ioctl is
+restarted, which sends a second invoke. The DSP later completes the first,
+orphaned context, and its reply is dropped.
+
+For a reverse-RPC listener (adsprpcd, the audio PD) the reply of its
+"next" invoke is the DSP's next request, so one DSP request is lost per
+suspend. On the Xiaomi 12T Pro (SM8475) the ADSP's voice graph loads its
+Fluence modules through the audio PD; after N suspends the next N graph
+opens fail (the DSP waits for a file read that never arrives), so calls
+have no audio until enough failed attempts have drained the orphans.
+
+Wait in TASK_INTERRUPTIBLE | TASK_FREEZABLE instead: the freezer then
+freezes the task in place, real signals still interrupt the wait.
+
+Device-tested on the Xiaomi 12T Pro.
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/misc/fastrpc.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index d7a9e12f5..832c9b7b8 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -1278,7 +1278,15 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 		if (!wait_for_completion_timeout(&ctx->work, 10 * HZ))
+ 			err = -ETIMEDOUT;
+ 	} else {
+-		err = wait_for_completion_interruptible(&ctx->work);
++		/*
++		 * Freezable: the freezer must not interrupt the wait. On
++		 * -ERESTARTSYS the context stays queued on the DSP and the
++		 * restarted ioctl sends a second one; the DSP then completes the
++		 * orphaned context and its reply (for a listener thread: the
++		 * DSP's next reverse-RPC request) is lost, once per suspend.
++		 */
++		err = wait_for_completion_state(&ctx->work,
++						TASK_INTERRUPTIBLE | TASK_FREEZABLE);
+ 	}
+ 
+ 	if (err)
+-- 
+2.55.0
+
