@@ -173,6 +173,12 @@ phosh-full)
 	in_root apt-get update
 	mapfile -t dpkgs < <(grep -v '^\s*#' "$UD/config/packages-desktop.list" | sed '/^\s*$/d')
 	in_root apt-get -y install "${dpkgs[@]}"
+	# postmarketOS' mobile Firefox UI, not in Ubuntu (make mobile-config-firefox)
+	mcf="$(latest 'mobile-config-firefox_*_all.deb')"
+	[ -f "$mcf" ] || die "missing $mcf (scripts/build-mobile-config-firefox.sh)"
+	cp "$mcf" "$ROOT/tmp/"
+	in_root apt-get -y install --reinstall "/tmp/${mcf##*/}"
+	rm -f "$ROOT/tmp/${mcf##*/}"
 	[ "$(in_root dpkg-query -W -f '${Version}' firefox)" != "${MOZ_FIREFOX_BAD:-1:1snap1}" ] ||
 		die "firefox came from Ubuntu (snap wrapper), not from packages.mozilla.org"
 	log "preseeding snap Chromium (installed by snapd at first boot)"
@@ -300,7 +306,8 @@ in_root_pkglist > "$OUT/rootfs-packages-$UBUNTU_SUITE$IMG_SUFFIX.tsv"
 
 if [ "$ROOTFS_PROFILE" = public ]; then
 	log "checking that no device firmware or private data is in the public tree"
-	! chroot "$ROOT" dpkg-query -W firmware-xiaomi-diting >/dev/null 2>&1 ||
+	# (a Recommends makes dpkg list the name as "un", not installed)
+	[ "$(chroot "$ROOT" dpkg-query -W -f '${db:Status-Abbrev}' firmware-xiaomi-diting 2>/dev/null)" != "ii " ] ||
 		die "firmware-xiaomi-diting is installed in the public tree"
 	leaks="$(cd "$ROOT" && find usr/lib/firmware/qcom/sm8475 usr/lib/firmware/qca/diting \
 		usr/lib/firmware/cirrus/*diting* usr/lib/firmware/updates \

@@ -39,11 +39,13 @@ does not work. Details: `docs/KNOWN_ISSUES.md` in the source repository.
 
 ## Install
 
-1. Download all parts of the release and check them:
+1. Download the release archive (`ubuntu-diting-<date>.tar.xz`, or all
+   `.tar.xz.NNN` parts if it is split) and its `.SHA256SUMS`, and check:
    `sha256sum -c ubuntu-diting-*.SHA256SUMS`
 2. Unpack:
    - Linux/macOS: `cat ubuntu-diting-*.tar.xz* | tar -xJ`
-   - Windows: open the `.tar.xz.000` file with 7-Zip and extract.
+   - Windows: open the `.tar.xz` (or `.tar.xz.000`) file with 7-Zip and
+     extract it twice (xz, then tar).
 3. Phone off, then hold **power + volume down** until FASTBOOT shows;
    connect USB.
 4. In the unpacked directory run `./flash-diting.sh` (Linux/macOS). It

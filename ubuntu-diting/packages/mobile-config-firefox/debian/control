@@ -1,0 +1,16 @@
+Source: mobile-config-firefox
+Section: web
+Priority: optional
+Maintainer: royka1 <397414+royka1@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://gitlab.postmarketos.org/postmarketOS/mobile-config-firefox
+Rules-Requires-Root: no
+
+Package: mobile-config-firefox
+Architecture: all
+Depends: ${misc:Depends}, firefox
+Description: mobile and privacy friendly configuration for Firefox
+ postmarketOS' Firefox configuration for phones: a mobile user interface
+ (compact toolbar, touch-friendly menus), mobile user agent and privacy
+ defaults, through Firefox policies and autoconfig.

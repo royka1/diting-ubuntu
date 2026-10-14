@@ -5,7 +5,7 @@ S := scripts
 SUDO ?= sudo -E
 
 .PHONY: help check-host sources check-latest-kernel update-kernel kernel dtbs phoc sensors libcamera \
-	dtbs-check packages vaapi firmware-setup firmware rootfs release initramfs boot image verify repro-check qemu-test \
+	dtbs-check packages vaapi firmware-setup mobile-config-firefox firmware rootfs release initramfs boot image verify repro-check qemu-test \
 	inspect-device lint clean distclean
 
 help:
@@ -40,6 +40,9 @@ packages:
 ## vaapi                libva-v4l2-stateful (VA-API driver for the iris decoder; arm64 buildd chroot)
 vaapi:
 	$(S)/build-libva-v4l2-stateful.sh
+## mobile-config-firefox  postmarketOS Firefox mobile UI (not in Ubuntu; arm64 buildd chroot)
+mobile-config-firefox:
+	$(S)/build-mobile-config-firefox.sh
 ## firmware-setup       diting-firmware-setup (first-boot firmware extraction; arm64 buildd chroot)
 firmware-setup:
 	$(S)/build-firmware-setup.sh
@@ -56,7 +59,7 @@ libcamera:
 phoc:
 	$(S)/build-phoc.sh
 ## rootfs               Ubuntu rootfs + ext4 image (needs root, uses sudo; ROOTFS_PROFILE=owner|public)
-rootfs: kernel packages vaapi firmware-setup
+rootfs: kernel packages vaapi firmware-setup mobile-config-firefox
 	$(SUDO) $(S)/build-rootfs.sh
 ## initramfs            regenerate the initramfs inside the rootfs (initramfs-tools)
 initramfs:

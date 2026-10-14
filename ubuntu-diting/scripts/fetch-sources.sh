@@ -74,3 +74,7 @@ git -C "$DITING_TOP/references/iio-sensor-proxy" checkout -q "$IIO_SENSOR_PROXY_
 fetch_ref libva-v4l2-stateful "$LIBVA_V4L2_URL"
 git -C "$DITING_TOP/references/libva-v4l2-stateful" cat-file -e "$LIBVA_V4L2_COMMIT^{commit}" ||
 	die "libva-v4l2-stateful: commit $LIBVA_V4L2_COMMIT missing"
+# Firefox mobile configuration (packages/mobile-config-firefox)
+fetch_ref mobile-config-firefox "$MOBILE_CONFIG_FIREFOX_URL"
+git -C "$DITING_TOP/references/mobile-config-firefox" cat-file -e "$MOBILE_CONFIG_FIREFOX_COMMIT^{commit}" ||
+	die "mobile-config-firefox: commit $MOBILE_CONFIG_FIREFOX_COMMIT missing"

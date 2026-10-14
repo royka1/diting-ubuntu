@@ -1,0 +1,6 @@
+mobile-config-firefox (5.4.1-0diting1) resolute; urgency=medium
+
+  * Package upstream 5.4.1 (a07a58f) for Firefox from packages.mozilla.org
+    (/usr/lib/firefox).
+
+ -- royka1 <397414+royka1@users.noreply.github.com>  Wed, 14 Oct 2026 15:00:00 +0200
