@@ -1,0 +1,39 @@
+#!/bin/bash
+# Move a Wi-Fi connection from 2.4 GHz back to 5/6 GHz of the same network.
+#
+# wpa_supplicant (NetworkManager's backend) roams within a network only to
+# an access point with a stronger signal, and with a good 2.4 GHz signal its
+# background scan runs every 300 s (bgscan simple:30:-65:300). After a
+# visit to a room with weak 5 GHz the phone therefore stays on 2.4 GHz next
+# to the router, at a fraction of the speed. Android picks the access point
+# by expected throughput instead.
+#
+# While connected on 2.4 GHz this scans once a minute and asks wpa_supplicant
+# to roam to the strongest 5/6 GHz access point of the same SSID once that
+# is at STEER_MIN_DBM or better. wpa_supplicant does not roam back down
+# while the 5 GHz link is the faster one, so this does not ping-pong.
+set -u
+
+IFACE="${STEER_IFACE:-wlp1s0}"
+MIN_DBM="${STEER_MIN_DBM:--72}"
+INTERVAL="${STEER_INTERVAL:-60}"
+
+wpa() { wpa_cli -i "$IFACE" "$@" 2>/dev/null; }
+
+while sleep "$INTERVAL"; do
+	status="$(wpa status)" || continue
+	grep -qx 'wpa_state=COMPLETED' <<<"$status" || continue
+	freq="$(sed -n 's/^freq=//p' <<<"$status")"
+	ssid="$(sed -n 's/^ssid=//p' <<<"$status")"
+	[ -n "$ssid" ] && [ "${freq:-0}" -lt 3000 ] || continue
+
+	wpa scan >/dev/null
+	sleep 5
+	# scan_results: bssid / frequency / signal level / flags / ssid (tab-separated)
+	best="$(wpa scan_results | awk -F'\t' -v ssid="$ssid" -v min="$MIN_DBM" \
+		'NR > 1 && $5 == ssid && $2 > 4900 && $3 >= min { print $3 "\t" $1 }' |
+		sort -rn | head -1)"
+	[ -n "$best" ] || continue
+	echo "roaming from $freq MHz to a ${best%%	*} dBm 5/6 GHz access point of the same network"
+	wpa roam "${best##*	}" >/dev/null
+done

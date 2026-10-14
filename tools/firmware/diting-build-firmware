@@ -46,7 +46,7 @@ done
 [ -x "${ACDB_QUERY:-}" ] || die "ACDB_QUERY must point to the acdb-query binary"
 
 PKG=firmware-xiaomi-diting
-PKG_VERSION="${FIRMWARE_PKG_VERSION:-0.9.2}"
+PKG_VERSION="${FIRMWARE_PKG_VERSION:-0.9.4}"
 FW=usr/lib/firmware
 DIT=qcom/sm8475/xiaomi/diting
 
@@ -66,11 +66,14 @@ BLOBS=(
 	"vendor_firmware.tar:vendor/firmware/cs35l41-dsp1-spk-prot.wmfw:cirrus/cs35l41-dsp1-spk-prot-diting.wmfw"
 	"vendor_firmware.tar:vendor/firmware/B-cs35l41-dsp1-spk-prot.bin:cirrus/cs35l41-dsp1-spk-prot-diting-b.bin"
 	"vendor_firmware.tar:vendor/firmware/T-cs35l41-dsp1-spk-prot.bin:cirrus/cs35l41-dsp1-spk-prot-diting-t.bin"
-	# Wi-Fi board data. INFERRED: hwc "GL" + project "l12" -> bd_l12gl.elf.
-	# ath11k accepts the ELF as board.bin; updates/ keeps it apart from
-	# Ubuntu's linux-firmware-qualcomm-wireless.
-	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/bd_l12gl.elf:updates/ath11k/WCN6855/hw2.0/board.bin"
-	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/bd_l12gl.elf:updates/ath11k/WCN6855/hw2.1/board.bin"
+	# Wi-Fi firmware as Android loads it for this QCA6490 revision (major
+	# version 2: amss20.bin, WLAN.HSP.2.0.c2). With linux-firmware's HSP.1.1
+	# builds one receive chain per band stays deaf (5 GHz -82 instead of
+	# -67 dBm, a few Mbit/s). Kernel r42 loads WCN6855 hw2.1 firmware from
+	# the nfa765 directory on this phone; updates/ takes precedence over
+	# Ubuntu's nfa765 files.
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/amss20.bin:updates/ath11k/WCN6855/hw2.1/nfa765/amss.bin"
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/m3.bin:updates/ath11k/WCN6855/hw2.1/nfa765/m3.bin"
 )
 # Split images, combined with mdt-squash.py: <tar>:<path of .mdt>:<target>
 SQUASH=(
@@ -165,6 +168,26 @@ for b in "${BLOBS[@]}"; do
 		esac
 	done
 done
+# Wi-Fi board data (INFERRED: hwc "GL" + project "l12" -> bd_l12gl.elf) with
+# this phone's MAC address, as a board-2.bin in updates/ (ahead of Ubuntu's,
+# whose generic board-id-255 entry is another design's RF configuration: no
+# 5 GHz). Entries: the calibration variant of the DT and the chip-id fallback
+# (for a DT without the variant). Needs kernel r42, which loads the Wi-Fi
+# firmware above (Ubuntu's default HSP.1.1 LITE firmware rejects this data).
+BDF=vendor/firmware_mnt/image/qca6490/bd_l12gl.elf
+WLAN_MAC=mnt/vendor/persist/qca6490/wlan_mac.bin
+fresh_tmp
+fetch vendor_firmware_mnt.tar "$BDF"
+if (fetch mnt_vendor_persist.tar "$WLAN_MAC") 2>/dev/null; then
+	board2=updates/ath11k/WCN6855/hw2.1/board-2.bin
+	mkdir -p "$(dirname "$bld/$FW/$board2")"
+	python3 -I -B "$DITING_TOOLS/ath11k-board2.py" --mac-file "$tmp/$WLAN_MAC" "$tmp/$BDF" "$bld/$FW/$board2" \
+		"bus=pci,vendor=17cb,device=1103,subsystem-vendor=17cb,subsystem-device=0108,qmi-chip-id=2,qmi-board-id=255,variant=Xiaomi_diting" \
+		"bus=pci,qmi-chip-id=2" || die "building $board2 failed"
+	echo "$FW/$board2 $(sha256_of "$bld/$FW/$board2") $(source_of vendor_firmware_mnt.tar "$BDF") + $(source_of mnt_vendor_persist.tar "$WLAN_MAC") (ath11k-board2.py)" >> "$manifest"
+else
+	warn "no $WLAN_MAC: Wi-Fi keeps the generic board data (no 5 GHz)"
+fi
 for b in "${SQUASH[@]}"; do
 	IFS=: read -r tarball mdt target <<<"$b"
 	fresh_tmp
@@ -241,8 +264,9 @@ Priority: optional
 Description: Xiaomi 12T Pro (diting) device-signed firmware (local build)
  Firmware extracted from the phone's own Android partitions that is signed
  for this device and therefore not part of linux-firmware: GPU zap shader,
- ADSP, Bluetooth NVM/rampatch, Wi-Fi board data, speaker amplifier tuning,
- modem and IPA firmware and carrier configuration, the ADSP's dynamic
+ ADSP, Bluetooth NVM/rampatch, Wi-Fi firmware and board data, speaker
+ amplifier tuning, modem and IPA firmware and carrier configuration, the
+ ADSP's dynamic
  audio modules, the voice call topology built from the device's ACDB, the
  factory speaker calibration, and the sensor DSP firmware, modules,
  configuration and factory sensor registry.

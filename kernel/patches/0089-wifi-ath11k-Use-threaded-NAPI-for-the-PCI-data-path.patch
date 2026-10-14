@@ -1,0 +1,39 @@
+From 39fb10afcabc18d7c55e0a9ed042056c7712c782 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 00:20:31 +0200
+Subject: [PATCH] wifi: ath11k: Use threaded NAPI for the PCI data path
+
+On the Xiaomi 12T Pro (SM8475, QCA6490) all data path interrupts of the
+device arrive on CPU 0, through the PCIe controller's MSI parent, whose
+affinity cannot be changed. Receive processing then runs in softirq
+context on that little core: during a download ksoftirqd/0 was at 91 %
+and throughput stayed far below the link rate.
+
+Enable threaded NAPI for the external interrupt groups, as ath10k does
+for its dummy NAPI device on SNOC, so that the scheduler can run the
+rings on other cores.
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/net/wireless/ath/ath11k/pcic.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/pcic.c b/drivers/net/wireless/ath/ath11k/pcic.c
+index 2259adc3b..fab54a9f0 100644
+--- a/drivers/net/wireless/ath/ath11k/pcic.c
++++ b/drivers/net/wireless/ath/ath11k/pcic.c
+@@ -600,6 +600,11 @@ static int ath11k_pcic_ext_irq_config(struct ath11k_base *ab)
+ 
+ 		netif_napi_add(irq_grp->napi_ndev, &irq_grp->napi,
+ 			       ath11k_pcic_ext_grp_napi_poll);
++		/* The data path interrupts often all arrive on one CPU (one MSI
++		 * parent); threaded NAPI lets the scheduler run the rings on
++		 * other cores.
++		 */
++		netif_threaded_enable(irq_grp->napi_ndev);
+ 
+ 		if (ab->hw_params.ring_mask->tx[i] ||
+ 		    ab->hw_params.ring_mask->rx[i] ||
+-- 
+2.55.0
+

@@ -72,7 +72,9 @@ FW_TREE="$tree" DITING_TOOLS="$LIB" ART_DIR="$LIB/audioreach-topology" \
 [ -z "$build_only" ] || exit 0
 
 say "installing firmware-xiaomi-diting"
-apt-get install -y --no-download --reinstall "$out"/firmware-xiaomi-diting_*_all.deb
+# not --no-download: apt then fails to upgrade an installed version of a
+# local .deb ("Pathname to install is not absolute"), as on a re-run
+apt-get install -y --reinstall "$out"/firmware-xiaomi-diting_*_all.deb
 # the package stays on this phone only (it contains Xiaomi/Qualcomm firmware)
 touch "$STATE/done"
 if [ "$reboot" = 1 ]; then

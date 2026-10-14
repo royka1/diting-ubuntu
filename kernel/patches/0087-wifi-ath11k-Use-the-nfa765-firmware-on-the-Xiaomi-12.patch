@@ -1,0 +1,44 @@
+From 0c8e2d20f9a2f308b662e08a6d5675b5c57bffde Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 22:58:08 +0200
+Subject: [PATCH 87/88] wifi: ath11k: Use the nfa765 firmware on the Xiaomi 12T
+ Pro
+
+The Xiaomi 12T Pro (diting) has a QCA6490 (WCN6855 hw2.1) with board
+data in the ELF format of Qualcomm's mobile designs. The default WCN6855
+firmware (WLAN.HSP.1.1-03125 SILICONZ_LITE) does not accept the phone's
+board data: the board data download times out, so only the generic
+board-id-255 entry of board-2.bin can be used, which carries the RF
+configuration of a different design. With it the phone finds no 5 GHz
+networks at all and uses a single stream on 2.4 GHz.
+
+The nfa765 firmware (WLAN.HSP.1.1-04685 SILICONZ_IOE), already selected
+for Qualcomm's QCA6490 evaluation boards, loads the phone's board data.
+The firmware Android runs on this phone (WLAN.HSP.2.0.c2, not in
+linux-firmware) also boots under ath11k and receives on both chains in
+both bands; it can be installed into the nfa765 directory under
+updates/, with linux-firmware's nfa765 files as the fallback.
+
+Device-tested on the Xiaomi 12T Pro (firmware loaded through
+firmware_class.path first, then this patch).
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/net/wireless/ath/ath11k/core.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 8dacc878c..f5597ce93 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -1052,6 +1052,7 @@ static const struct __ath11k_core_usecase_firmware_table {
+ 	{ ATH11K_HW_WCN6855_HW21, "qcom,lemans-evk", "nfa765"},
+ 	{ ATH11K_HW_WCN6855_HW21, "qcom,monaco-evk", "nfa765"},
+ 	{ ATH11K_HW_WCN6855_HW21, "qcom,hamoa-iot-evk", "nfa765"},
++	{ ATH11K_HW_WCN6855_HW21, "xiaomi,diting", "nfa765"},
+ 	{ /* Sentinel */ }
+ };
+ 
+-- 
+2.55.0
+

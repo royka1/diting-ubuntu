@@ -1,7 +1,7 @@
 # Known issues and risks
 
-State as of 2026-10-14 (kernel 7.2.10-diting r41, device-xiaomi-diting 0.7.12,
-firmware-xiaomi-diting 0.9.2, diting-firmware-setup 0.1.0). Device evidence is
+State as of 2026-10-14 (kernel 7.2.10-diting r43, device-xiaomi-diting 0.7.13,
+firmware-xiaomi-diting 0.9.4, diting-firmware-setup 0.1.1). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
 ## Open, device-confirmed
@@ -68,6 +68,36 @@ in `docs/BRINGUP_STATUS.md`.
   (patch 0086): the bottom speaker was silent whenever the speaker
   protection firmware ran (its second receive slot repeated its own channel;
   the vendor layout gives RX2 the other channel).
+- **Wi-Fi 5 GHz** (fixed in r42 / firmware 0.9.4): ath11k used the generic
+  board-id-255 entry of Ubuntu's board-2.bin (another design's RF setup):
+  no 5 GHz networks at all and one stream on 2.4 GHz. Ubuntu's default
+  WCN6855 firmware rejects the phone's own board data. Kernel r42 (patch
+  0087) loads WCN6855 firmware from the nfa765 directory on this phone;
+  firmware-xiaomi-diting puts the firmware Android uses there under
+  updates/ (amss20.bin, WLAN.HSP.2.0.c2, with m3.bin), plus a board-2.bin
+  with bd_l12gl.elf (the file Android loads) and this phone's MAC from
+  persist (the Xiaomi board data has none). Without the firmware package
+  Ubuntu's nfa765 firmware runs with the generic board data (2.4 GHz).
+  After a clean boot: both chains receive (5 GHz [-57, -66] dBm), TX
+  866 Mbit/s, no lost frames; owner speed test on the vendor firmware
+  (before the reloads) over 400 Mbit/s.
+  Repeated ath11k module reloads (about 20 in one boot, with PCIe AER
+  timeouts) left the chip with one deaf chain per band and 80-90 %
+  transmit failures until a reboot: do not judge Wi-Fi after reloads.
+- **Wi-Fi band choice** (device pkg 0.7.13): wpa_supplicant roams within a
+  network only to a stronger access point (background scan every 300 s
+  while the signal is above -65 dBm), so after a room with weak 5 GHz the
+  phone stayed on 2.4 GHz next to the router. diting-wifi-band-steer scans
+  once a minute while on 2.4 GHz and roams to the same network's 5/6 GHz
+  access point at -72 dBm or better; device-tested 2.4 GHz -> 5180 MHz,
+  link 1921/1441 Mbit/s (160 MHz, 2 streams).
+- **Wi-Fi throughput** (r43, patch 0089): all ath11k data path interrupts
+  arrive on CPU 0 (multiplexed PCIe MSI, affinity fixed), so receive
+  processing ran in softirq on that little core (ksoftirqd/0 91 %) and
+  TCP downloads reached about 210 Mbit/s on a 1921 Mbit/s link (657 with
+  Wi-Fi power save off). Threaded NAPI moves the rings to kthreads on
+  other cores: 888 Mbit/s from a gigabit-wired PC with power save on
+  (857 off), i.e. the wired side's limit.
 - **Speaker protection** runs: the CS35L41 protection firmware (Cirrus CSPL)
   with this unit's factory calibration from persist/audio/crus_calr.bin
   (top 5.90 ohm, bottom 7.12 ohm), set up by diting-speaker-protection at

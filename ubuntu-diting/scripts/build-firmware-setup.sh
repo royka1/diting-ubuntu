@@ -16,7 +16,7 @@ rm -rf "$src" && mkdir -p "$src/tools/camera" "$src/tools/acdb" "$src/audioreach
 P="$UD/packages/diting-firmware-setup"
 cp -a "$P/debian" "$P/diting-firmware-setup" "$src/"
 T="$DITING_TOP/tools"
-cp "$T/firmware/diting-build-firmware" "$T/lpmeta.py" "$T/mdt-squash.py" "$src/tools/"
+cp "$T/firmware/diting-build-firmware" "$T/lpmeta.py" "$T/mdt-squash.py" "$T/ath11k-board2.py" "$src/tools/"
 cp "$T/camera/chromatix-to-camregs.py" "$T/camera/chromatix_regs.py" "$src/tools/camera/"
 cp "$T/acdb/build-voice-tplg.sh" "$T/acdb/voice-tplg.py" "$T/acdb/acdb-query.c" "$T/acdb/logstub.c" "$src/tools/acdb/"
 git -C "$R/audioreach-topology" archive HEAD | tar -x -C "$src/audioreach-topology"

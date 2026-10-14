@@ -1,0 +1,12 @@
+[Unit]
+Description=Move Wi-Fi from 2.4 GHz back to 5/6 GHz of the same network
+After=wpa_supplicant.service
+BindsTo=wpa_supplicant.service
+
+[Service]
+ExecStart=/usr/libexec/diting/diting-wifi-band-steer
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=wpa_supplicant.service

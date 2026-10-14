@@ -1,3 +1,14 @@
+diting-firmware-setup (0.1.1) resolute; urgency=medium
+
+  * Ship ath11k-board2.py: the Wi-Fi board data becomes an ath11k
+    board-2.bin with this phone's MAC address (firmware-xiaomi-diting
+    0.9.4, which also carries the phone's own Wi-Fi firmware); with
+    kernel r42 it enables 5 GHz and both receive chains.
+  * Install the built package without --no-download: apt cannot upgrade
+    an installed version from a local .deb with it, so a re-run failed.
+
+ -- royka1 <397414+royka1@users.noreply.github.com>  Wed, 14 Oct 2026 23:20:00 +0200
+
 diting-firmware-setup (0.1.0) resolute; urgency=medium
 
   * First version: build firmware-xiaomi-diting at first boot from the

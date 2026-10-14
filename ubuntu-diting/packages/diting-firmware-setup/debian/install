@@ -2,6 +2,7 @@ diting-firmware-setup usr/sbin
 tools/diting-build-firmware usr/lib/diting-firmware-setup
 tools/lpmeta.py usr/lib/diting-firmware-setup
 tools/mdt-squash.py usr/lib/diting-firmware-setup
+tools/ath11k-board2.py usr/lib/diting-firmware-setup
 tools/camera/chromatix-to-camregs.py usr/lib/diting-firmware-setup/camera
 tools/camera/chromatix_regs.py usr/lib/diting-firmware-setup/camera
 tools/acdb/acdb-query usr/lib/diting-firmware-setup/acdb
