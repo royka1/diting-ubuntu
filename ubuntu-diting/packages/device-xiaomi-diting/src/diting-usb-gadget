@@ -41,6 +41,12 @@ start() {
 
 stop() {
 	[ -d "$G" ] || return 0
+	# At shutdown leave the gadget bound: unbinding the UDC can block for
+	# minutes (seen with the ACM serial console open), and the controller
+	# is reset on reboot/poweroff anyway.
+	case "$(systemctl is-system-running 2>/dev/null)" in
+	stopping) echo "shutting down: gadget left bound"; return 0 ;;
+	esac
 	echo "" > "$G/UDC" 2>/dev/null || true
 	rm -f "$G/configs/c.1/ncm.usb0" "$G/configs/c.1/acm.GS0"
 	rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" \

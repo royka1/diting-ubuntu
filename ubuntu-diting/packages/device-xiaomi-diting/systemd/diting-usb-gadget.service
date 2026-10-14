@@ -15,6 +15,7 @@ Environment=DITING_USB_ADDR=
 RemainAfterExit=yes
 ExecStart=/usr/lib/diting/diting-usb-gadget start
 ExecStop=/usr/lib/diting/diting-usb-gadget stop
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 # Known issues and risks
 
-State as of 2026-10-14 (kernel 7.2.10-diting r40, device-xiaomi-diting 0.7.11,
+State as of 2026-10-14 (kernel 7.2.10-diting r41, device-xiaomi-diting 0.7.12,
 firmware-xiaomi-diting 0.9.2, diting-firmware-setup 0.1.0). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
@@ -64,7 +64,10 @@ in `docs/BRINGUP_STATUS.md`.
   upstream fix, pinned). Kernel r40 (patch 0085): the fastrpc driver lost
   one DSP request per suspend (the freezer interrupted adsprpcd's listener
   wait), so the first voice-graph opens after N suspends failed and calls
-  had no audio; owner-tested call after 3 suspends with audio.
+  had no audio; owner-tested call after 3 suspends with audio. Kernel r41
+  (patch 0086): the bottom speaker was silent whenever the speaker
+  protection firmware ran (its second receive slot repeated its own channel;
+  the vendor layout gives RX2 the other channel).
 - **Speaker protection** runs: the CS35L41 protection firmware (Cirrus CSPL)
   with this unit's factory calibration from persist/audio/crus_calr.bin
   (top 5.90 ohm, bottom 7.12 ohm), set up by diting-speaker-protection at
