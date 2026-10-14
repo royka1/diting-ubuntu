@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 13:37:11 +0200
+Subject: [PATCH 17/46] dt-bindings: phy: qcom,sc8280xp-qmp-pcie-phy: Add
+ SM8475 gen3x1 PHY
+
+SM8475 PCIe0 uses a V6 gen3x2 QMP PHY wired as a single lane, unlike the
+V5 gen3x1 PHY of SM8450.
+---
+ .../devicetree/bindings/phy/qcom,sc8280xp-qmp-pcie-phy.yaml     | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-pcie-phy.yaml b/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-pcie-phy.yaml
+index 108cf9dc8..8850d5eba 100644
+--- a/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-pcie-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/qcom,sc8280xp-qmp-pcie-phy.yaml
+@@ -43,6 +43,7 @@ properties:
+       - qcom,sm8350-qmp-gen3x2-pcie-phy
+       - qcom,sm8450-qmp-gen3x1-pcie-phy
+       - qcom,sm8450-qmp-gen4x2-pcie-phy
++      - qcom,sm8475-qmp-gen3x1-pcie-phy
+       - qcom,sm8550-qmp-gen3x2-pcie-phy
+       - qcom,sm8550-qmp-gen4x2-pcie-phy
+       - qcom,sm8650-qmp-gen3x2-pcie-phy
+@@ -175,6 +176,7 @@ allOf:
+               - qcom,sm8350-qmp-gen3x2-pcie-phy
+               - qcom,sm8450-qmp-gen3x1-pcie-phy
+               - qcom,sm8450-qmp-gen3x2-pcie-phy
++              - qcom,sm8475-qmp-gen3x1-pcie-phy
+               - qcom,sm8550-qmp-gen3x2-pcie-phy
+               - qcom,sm8550-qmp-gen4x2-pcie-phy
+               - qcom,sm8650-qmp-gen3x2-pcie-phy

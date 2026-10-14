@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 13:39:03 +0200
+Subject: [PATCH 19/46] arm64: dts: qcom: sm8475: Use the SM8475 PCIe0 PHY
+
+---
+ arch/arm64/boot/dts/qcom/sm8475.dtsi | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475.dtsi b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+index 7fc32dc7a..6f47cb2f0 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+@@ -61,6 +61,11 @@ &dispcc {
+ 	compatible = "qcom,sm8475-dispcc";
+ };
+ 
++/* SM8475 PCIe0 has a V6 gen3x2 PHY wired as one lane */
++&pcie0_phy {
++	compatible = "qcom,sm8475-qmp-gen3x1-pcie-phy";
++};
++
+ &gcc {
+ 	compatible = "qcom,sm8475-gcc";
+ };

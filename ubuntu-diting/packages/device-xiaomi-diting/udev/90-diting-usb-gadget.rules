@@ -1,0 +1,6 @@
+# Configure the debug USB gadget as soon as the dwc3 device controller appears.
+ACTION=="add", SUBSYSTEM=="udc", TAG+="systemd", ENV{SYSTEMD_WANTS}+="diting-usb-gadget.service"
+
+# NetworkManager's 85-nm-unmanaged.rules ignores all gadget network devices;
+# the Diting's own usb0 is configured by the diting-usb0 profile.
+SUBSYSTEM=="net", ENV{DEVTYPE}=="gadget", KERNEL=="usb0", ENV{NM_UNMANAGED}="0"

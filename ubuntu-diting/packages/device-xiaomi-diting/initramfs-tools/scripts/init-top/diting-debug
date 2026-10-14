@@ -1,0 +1,57 @@
+#!/bin/sh
+# Early debug for Xiaomi Diting, enabled only by "diting.debug=usb" on the
+# kernel command line:
+#  - USB gadget: NCM (172.16.42.1/24) + ACM serial with a root shell on
+#    /dev/ttyGS0 (physical USB access only)
+#  - copies of dmesg are written to /dev/pmsg0 (pstore), readable after a
+#    warm reboot into Android from /sys/fs/pstore/pmsg-ramoops-0
+# "diting.debug=hold" additionally stops the boot here.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+
+debug=
+# shellcheck disable=SC2013 # cmdline is a list of words
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in diting.debug=*) debug="${arg#diting.debug=}" ;; esac
+done
+[ -n "$debug" ] || exit 0
+
+# shellcheck disable=SC1091 # provided by initramfs-tools at runtime
+. /scripts/functions
+
+log_begin_msg "Diting debug mode ($debug)"
+i=0
+while ! [ -e "$(echo /sys/class/udc/*)" ] && [ $i -lt 30 ]; do
+	sleep 1; i=$((i + 1))
+done
+/usr/lib/diting/diting-usb-gadget start || log_warning_msg "USB gadget failed"
+i=0
+while [ ! -c /dev/ttyGS0 ] && [ $i -lt 10 ]; do sleep 1; i=$((i + 1)); done
+# Background helpers record their PIDs and stop when init-bottom/diting-debug
+# creates the stop flag, before run-init deletes the initramfs they run from.
+stop=/run/diting-debug.stop
+if [ -c /dev/ttyGS0 ]; then
+	run=""
+	command -v setsid >/dev/null 2>&1 && run="setsid"
+	(
+		while [ ! -e "$stop" ]; do
+			$run sh -c 'exec sh </dev/ttyGS0 >/dev/ttyGS0 2>&1' &
+			echo $! > /run/diting-debug-shell.pid
+			wait $!
+			sleep 1
+		done
+	) &
+	echo $! >> /run/diting-debug.pids
+fi
+if [ -c /dev/pmsg0 ]; then
+	( while [ ! -e "$stop" ]; do dmesg > /dev/pmsg0 2>/dev/null; sleep 5; done ) &
+	echo $! >> /run/diting-debug.pids
+fi
+log_end_msg
+
+if [ "$debug" = hold ]; then
+	echo "diting.debug=hold: halting boot; shell on USB ACM (ttyGS0)" > /dev/kmsg
+	while true; do sleep 3600; done
+fi
+exit 0

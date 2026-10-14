@@ -1,0 +1,65 @@
+From 4a082571484cd1d80e639e49c8d6f91dd9e91b30 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 18:47:07 +0200
+Subject: [PATCH 76/76] arm64: dts: qcom: sm8475-xiaomi-diting: Add the main
+ camera lens and EEPROM
+
+The AK7314 lens actuator answers at 0x0c and the module EEPROM (vendor
+eeprom0, P24C128F) at 0x51 on CCI0 master 1; both are powered from the
+WL2866D outputs of the sensor. The EEPROM is described read-only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/sm8475-xiaomi-diting.dts    | 22 +++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 980d19d9b..3508052a7 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -745,6 +745,18 @@ &cci0_i2c1 {
+ 	 * WL2866D AVDD2 (type 0x10), AVDD1 (0xf, 1.8 V I/O), AVDD 2.9 V,
+ 	 * DVDD 1.1 V, reset release, MCLK. C-PHY, three trios.
+ 	 */
++	/*
++	 * Lens actuator of the main camera: AK7314 at 0x0c (module data
++	 * diting_semco_s5khp1_ak7314_wide_actuator: 10-bit position << 6 in
++	 * register 0, mode register 2, powered from WL2866D AVDD2 and AVDD1).
++	 */
++	cam_wide_lens: actuator@c {
++		compatible = "asahi-kasei,ak7314";
++		reg = <0x0c>;
++		vdd-supply = <&cam_ldo_avdd2>;
++		vio-supply = <&cam_ldo_avdd1>;
++	};
++
+ 	camera@10 {
+ 		compatible = "samsung,s5khp1";
+ 		reg = <0x10>;
+@@ -762,6 +774,8 @@ camera@10 {
+ 		vdda-supply = <&cam_wide_avdd>;
+ 		vddd-supply = <&cam_wide_dvdd>;
+ 
++		lens-focus = <&cam_wide_lens>;
++
+ 		firmware-name = "qcom/sm8475/xiaomi/diting/s5khp1-wide.camregs";
+ 
+ 		orientation = <1>;
+@@ -776,6 +790,14 @@ cam_wide_ep: endpoint {
+ 			};
+ 		};
+ 	};
++
++	/* Main camera module EEPROM (vendor eeprom0, P24C128F), read-only */
++	eeprom@51 {
++		compatible = "puya,p24c128f", "atmel,24c128";
++		reg = <0x51>;
++		vcc-supply = <&cam_ldo_avdd1>;
++		read-only;
++	};
+ };
+ 
+ 
+-- 
+2.47.3
+

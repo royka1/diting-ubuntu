@@ -1,0 +1,13 @@
+# Xiaomi Diting: first-boot systemd presets (take precedence over 90-*.preset).
+# sshd is socket-activated; ssh.service in addition would also bind port 22.
+enable ssh.socket
+disable ssh.service
+# NetworkManager manages usb0 (static 172.16.42.1); no second network stack.
+enable NetworkManager.service
+disable systemd-networkd.service
+disable systemd-networkd-wait-online.service
+enable diting-usb-gadget.service
+enable diting-boot-successful.service
+enable diting-modem-setup.service
+enable diting-voice-call.service
+enable diting-speaker-protection.service

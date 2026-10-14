@@ -1,0 +1,18 @@
+#!/bin/sh
+# Reboot the Diting into fastboot (ABL) without the button combo, also from
+# the initramfs where no reboot(8) with arguments exists. Writes reboot
+# reason 2 ("bootloader", as in upstream pmk8350.dtsi nvmem-reboot-mode) into
+# the PMK8350 SDAM cell at 0x48 (bits 1..7), then forces a reboot.
+# On a full system "systemctl reboot bootloader" does the same.
+set -e
+cell=""
+for d in /sys/bus/nvmem/devices/*; do
+	case "$(readlink -f "$d/of_node" 2>/dev/null)" in
+	*/pmic@0/nvram@7100) cell="$d/nvmem" ;;
+	esac
+done
+[ -n "$cell" ] || { echo "PMK8350 SDAM (nvram@7100) not found" >&2; exit 1; }
+printf '\004' | dd of="$cell" bs=1 seek=72 count=1 conv=notrunc 2>/dev/null
+sync
+echo 1 > /proc/sys/kernel/sysrq
+echo b > /proc/sysrq-trigger

@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 13:52:35 +0200
+Subject: [PATCH 21/46] arm64: dts: qcom: sm8475: Use the PCIe0 controller MSIs
+
+MSIs from the PCIe0 endpoint never arrive through the GIC ITS on SM8475;
+ath11k's MHI boot times out waiting for them. The vendor kernel uses
+SPI-based MSI too. Drop msi-map so the DWC controller's msi0..7
+interrupts are used. Device-tested with a QCA6490.
+---
+ arch/arm64/boot/dts/qcom/sm8475.dtsi | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475.dtsi b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+index 6f47cb2f0..2f5b29ba1 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+@@ -61,6 +61,16 @@ &dispcc {
+ 	compatible = "qcom,sm8475-dispcc";
+ };
+ 
++/*
++ * MSIs from the endpoint never reach the GIC ITS on SM8475 (the vendor kernel
++ * uses SPI-based MSI as well): ath11k's MHI boot times out. Use the
++ * controller's own MSI interrupts.
++ */
++&pcie0 {
++	/delete-property/ msi-map;
++	/delete-property/ msi-map-mask;
++};
++
+ /* SM8475 PCIe0 has a V6 gen3x2 PHY wired as one lane */
+ &pcie0_phy {
+ 	compatible = "qcom,sm8475-qmp-gen3x1-pcie-phy";

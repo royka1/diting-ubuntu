@@ -1,0 +1,63 @@
+From 17a953997753bcf668ece1f9a5aae610fdff4d69 Mon Sep 17 00:00:00 2001
+From: diting <diting@localhost>
+Date: Tue, 13 Oct 2026 19:44:56 +0200
+Subject: [PATCH 1/4] ipa: libipa: Add Samsung S5K4H7 sensor helper and properties
+
+---
+ src/ipa/libipa/camera_sensor_helper.cpp          | 12 ++++++++++++
+ .../sensor/camera_sensor_properties.cpp          | 16 ++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index e3e3e53..bad76e1 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -789,6 +789,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov13858", CameraSensorHelperOv13858)
+ 
++class CameraSensorHelperS5k4h7 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k4h7()
++	{
++		/* 0x40 at 10 bits; analogue gain code 32 = 1x (CCS) */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k4h7", CameraSensorHelperS5k4h7)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 235a875..efa6391 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -503,6 +503,22 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5k4h7", {
++			.unitCellSize = { 1120, 1120 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {
+-- 
+2.47.3
+

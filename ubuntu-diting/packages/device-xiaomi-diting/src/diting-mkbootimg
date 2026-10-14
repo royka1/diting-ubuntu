@@ -1,0 +1,142 @@
+#!/bin/bash
+# Build Android boot v4 images (boot.img + vendor_boot.img) for Xiaomi
+# Diting from a kernel Image, an initramfs and the mainline DTB.
+#
+# This tool only WRITES FILES. It never flashes, boots or touches the phone.
+#
+# Layout facts (header v4, page size, offsets, ABL DTB ids) come from
+# /etc/diting/bootimg.conf, which was derived from the stock images of a
+# 22081212UG unit; see BOOT_LAYOUT.md in the ubuntu-diting tree.
+set -euo pipefail
+
+CONF="${DITING_BOOTIMG_CONF:-/etc/diting/bootimg.conf}"
+usage() {
+	cat >&2 <<U
+usage: diting-mkbootimg --kernel Image --initrd initrd --dtb dtb --out DIR
+                        [--cmdline "args"] [--name SUFFIX] [--conf FILE]
+   or: diting-mkbootimg --release KVER [--out DIR]   (installed kernel)
+U
+	exit 2
+}
+
+kernel='' initrd='' dtb='' out='' cmdline_extra='' name='' release=''
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--kernel) kernel="$2"; shift 2 ;;
+	--initrd) initrd="$2"; shift 2 ;;
+	--dtb) dtb="$2"; shift 2 ;;
+	--out) out="$2"; shift 2 ;;
+	--cmdline) cmdline_extra="$2"; shift 2 ;;
+	--name) name="$2"; shift 2 ;;
+	--conf) CONF="$2"; shift 2 ;;
+	--release) release="$2"; shift 2 ;;
+	*) usage ;;
+	esac
+done
+
+# shellcheck source=/dev/null
+. "$CONF"
+: "${BOOT_HEADER_VERSION:?}" "${BOOT_PAGESIZE:?}" "${ABL_MSM_ID:?}" "${ABL_BOARD_ID:?}"
+
+if [ -n "$release" ]; then
+	kernel="${kernel:-/boot/vmlinuz-$release}"
+	initrd="${initrd:-/boot/initrd.img-$release}"
+	dtb="${dtb:-/usr/lib/linux-image-$release/$KERNEL_DTB}"
+	out="${out:-/boot/diting}"
+	name="${name:-$release}"
+	cmdline_extra="${cmdline_extra:-$(cat /etc/diting/cmdline 2>/dev/null || true)}"
+fi
+if [ -z "$kernel" ] || [ -z "$initrd" ] || [ -z "$dtb" ] || [ -z "$out" ]; then
+	usage
+fi
+for f in "$kernel" "$initrd" "$dtb"; do
+	[ -s "$f" ] || { echo "diting-mkbootimg: missing or empty: $f" >&2; exit 1; }
+done
+for t in mkbootimg fdtput fdtget; do
+	command -v "$t" >/dev/null || { echo "diting-mkbootimg: needs $t" >&2; exit 1; }
+done
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# The stock kernel is an uncompressed arm64 Image, so use one too. Debian
+# kernel packages install /boot/vmlinuz as Image.gz on arm64: unpack it.
+if [ "$(od -An -tx1 -N2 "$kernel" | tr -d ' ')" = "1f8b" ]; then
+	gzip -dc "$kernel" > "$tmp/Image"
+	kernel="$tmp/Image"
+fi
+if [ "$(od -An -tx1 -j56 -N4 "$kernel" | tr -d ' ')" != "41524d64" ]; then
+	echo "diting-mkbootimg: $kernel is not an arm64 Image" >&2
+	exit 1
+fi
+
+# ABL selects the DTB from vendor_boot by qcom,msm-id/qcom,board-id. These
+# properties are deprecated in upstream bindings for SM8450-class SoCs, so
+# they are added to a copy of the DTB here instead of in the DTS.
+cp "$dtb" "$tmp/dtb"
+# shellcheck disable=SC2086
+fdtput -t i "$tmp/dtb" / qcom,msm-id $ABL_MSM_ID
+# shellcheck disable=SC2086
+fdtput -t i "$tmp/dtb" / qcom,board-id $ABL_BOARD_ID
+
+# ABL keeps the panel powered for the kernel (continuous splash) only if it
+# finds the vendor-named node /reserved-memory/splash_region; otherwise it logs
+# "Splash region not found in device tree, powering down the display" and the
+# simple-framebuffer stays black. Rename our upstream-style node accordingly.
+splash="$(fdtget -l "$tmp/dtb" /reserved-memory | grep -m1 "^memory@${ABL_SPLASH_ADDR#0x}$" || true)"
+if [ -n "$splash" ]; then
+	reg="$(fdtget -tx "$tmp/dtb" "/reserved-memory/$splash" reg)"
+	fdtput -r "$tmp/dtb" "/reserved-memory/$splash"
+	fdtput -c "$tmp/dtb" /reserved-memory/splash_region
+	# shellcheck disable=SC2086
+	fdtput -tx "$tmp/dtb" /reserved-memory/splash_region reg $reg
+	fdtput -t s "$tmp/dtb" /reserved-memory/splash_region label cont_splash_region
+	fdtput -t s "$tmp/dtb" /reserved-memory/splash_region no-map ""
+fi
+
+# Bluetooth address (no valid one in the controller, see diting-bt-address)
+bt=/soc@0/geniqup@8c0000/serial@894000/bluetooth
+if fdtget "$tmp/dtb" "$bt" compatible >/dev/null 2>&1 &&
+   btaddr="$(/usr/lib/diting/diting-bt-address --le-bytes 2>/dev/null)"; then
+	# shellcheck disable=SC2086
+	fdtput -t bx "$tmp/dtb" "$bt" local-bd-address $btaddr
+fi
+
+cmdline="$BOOT_CMDLINE_BASE${cmdline_extra:+ $cmdline_extra}"
+mkdir -p "$out"
+suffix="${name:+-$name}"
+boot="$out/boot$suffix.img"
+vboot="$out/vendor_boot$suffix.img"
+
+mkbootimg \
+	--header_version "$BOOT_HEADER_VERSION" \
+	--pagesize "$BOOT_PAGESIZE" \
+	--os_version "$BOOT_OS_VERSION" \
+	--os_patch_level "$BOOT_OS_PATCH_LEVEL" \
+	--base "$VENDOR_BOOT_BASE" \
+	--kernel_offset "$VENDOR_BOOT_KERNEL_OFFSET" \
+	--ramdisk_offset "$VENDOR_BOOT_RAMDISK_OFFSET" \
+	--tags_offset "$VENDOR_BOOT_TAGS_OFFSET" \
+	--dtb_offset "$VENDOR_BOOT_DTB_OFFSET" \
+	--kernel "$kernel" \
+	--dtb "$tmp/dtb" \
+	--vendor_ramdisk "$initrd" \
+	--vendor_cmdline "$cmdline" \
+	--vendor_boot "$vboot.tmp" \
+	-o "$boot.tmp"
+
+check_size() { # file limit
+	local sz
+	sz=$(stat -c %s "$1")
+	if [ "$sz" -gt "$2" ]; then
+		echo "diting-mkbootimg: $1 is $sz bytes, partition holds $2" >&2
+		rm -f "$1"
+		exit 1
+	fi
+}
+check_size "$boot.tmp" "$BOOT_PARTITION_SIZE"
+check_size "$vboot.tmp" "$VENDOR_BOOT_PARTITION_SIZE"
+mv "$boot.tmp" "$boot"
+mv "$vboot.tmp" "$vboot"
+echo "diting-mkbootimg: wrote $boot and $vboot (not flashed)"
+echo "diting-mkbootimg: cmdline: $cmdline"

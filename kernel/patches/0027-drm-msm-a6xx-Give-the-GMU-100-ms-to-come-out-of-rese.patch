@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 15:32:27 +0200
+Subject: [PATCH 27/46] drm/msm/a6xx: Give the GMU 100 ms to come out of reset
+
+On the SM8475 (A730v3) the GMU was measured needing up to 12 ms (median
+about 5 ms over 43 resumes) to report FW_INIT_RESULT after a runtime
+power collapse, mostly while the display was being reconfigured. With
+the 10 ms limit the resume failed now and then, the following OOB
+requests timed out and the GPU stayed hung until reboot. Downstream
+waits 100 ms for the same register.
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index a2f6918c4..0a65a6169 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -319,8 +319,13 @@ static int a6xx_gmu_start(struct a6xx_gmu *gmu)
+ 
+ 	gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 0);
+ 
++	/*
++	 * Downstream allows 100 ms. The A730v3 GMU of SM8475 was measured
++	 * taking up to 12 ms to come out of reset after a power collapse
++	 * (median ~5 ms), so 10 ms failed now and then and left the GPU hung.
++	 */
+ 	ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_CM3_FW_INIT_RESULT, val,
+-		(val & mask) == reset_val, 100, 10000);
++		(val & mask) == reset_val, 100, 100000);
+ 
+ 	if (ret)
+ 		DRM_DEV_ERROR(gmu->dev, "GMU firmware initialization timed out\n");

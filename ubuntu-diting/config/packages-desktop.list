@@ -1,0 +1,18 @@
+# Phone desktop (ROOTFS_DESKTOP=phosh-full), installed with recommends.
+phosh-full
+phosh-phone
+gnome-snapshot
+# Firefox from Mozilla's APT repository (config/apt/mozilla.*; Ubuntu's
+# firefox package is a snap wrapper), with the mobile UI tweaks
+firefox
+mobile-config-firefox
+libavcodec-extra
+# Chromium is a snap, preseeded (build-rootfs.sh); snapd installs it at first boot
+snapd
+# Diagnostics
+vainfo
+alsa-utils
+v4l-utils
+htop
+mesa-utils
+vulkan-tools

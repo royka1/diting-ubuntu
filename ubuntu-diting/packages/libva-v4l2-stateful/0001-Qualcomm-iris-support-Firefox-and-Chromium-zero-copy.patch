@@ -1,0 +1,1515 @@
+From b2a5ed8b92ed103f62baa46651e82651e2d48982 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 11:58:32 +0200
+Subject: [PATCH 1/2] Qualcomm iris support, Firefox and Chromium zero-copy
+
+Decoding (all bit-exact against software decoding on the Diting iris
+decoder: H.264 with B-frames, HEVC, VP9 incl. alt-ref and YouTube VP9):
+- Record the real CAPTURE layout (one-plane NV12, aligned stride/rows)
+  and use it for GetImage, DeriveImage and surface export.
+- Map pictures to surfaces by V4L2 timestamp instead of dequeue order;
+  hidden VP9 frames (show_frame = 0) produce no picture.
+- Request decode-order output (display delay controls), so every
+  picture arrives without waiting for later input.
+- H.264: take the PPS default reference counts from the first P/B slice
+  and resend the PPS when it changes.
+- Reserve buffer IDs before use (race), free image buffers on destroy.
+- Collect pictures while waiting for a free OUTPUT buffer (deadlock).
+- Detach surfaces when their context is destroyed (use after free).
+
+VA-API conformance:
+- QueryConfigAttributes reports the RT format; QuerySurfaceAttributes
+  reports min/max width and height and no longer overflows the
+  caller's array.
+- ExportSurfaceHandle fills DRM_PRIME_2 descriptors with real offsets
+  and pitches; the caller owns the fd.
+
+Chromium (exports surfaces before decoding, never calls vaSyncSurface):
+- Such surfaces get their own GBM buffer in the decoder layout, and the
+  CAPTURE queue switches to DMABUF so the decoder writes into them
+  directly. One buffer is queued at a time, for the oldest waiting
+  frame: the firmware returns empty buffers for hidden frames early,
+  which would shift a deeper queue.
+- vaEndPicture waits for the picture of such surfaces, since Chromium
+  displays them right away.
+- V4L2VA_OWN_BUFFERS=1 forces this path for testing with ffmpeg.
+
+Firefox: ExportSurfaceHandle waits for the picture (Firefox exports
+before vaSyncSurface).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ meson.build        |   1 +
+ src/h264.c         |  55 ++++--
+ src/v4l2-backend.c | 402 ++++++++++++++++++++++++++++++++++----
+ src/vabackend.c    | 467 ++++++++++++++++++++++++++++++++-------------
+ src/vabackend.h    |  55 +++++-
+ src/vp9.c          |  13 ++
+ 6 files changed, 805 insertions(+), 188 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index a0b2dcf..59e8ccf 100644
+--- a/meson.build
++++ b/meson.build
+@@ -17,6 +17,7 @@ deps = [
+     cc.find_library('m'),
+     cc.find_library('dl', required : false),
+     dependency('libdrm', version: '>=2.4.60'),
++    dependency('gbm'),
+     dependency('threads'),
+ ]
+ libva_deps = dependency('libva', version: '>= 1.8.0').partial_dependency(compile_args: true)
+diff --git a/src/h264.c b/src/h264.c
+index 76a8cc0..942b9db 100644
+--- a/src/h264.c
++++ b/src/h264.c
+@@ -230,7 +230,8 @@ static size_t h264_generate_sps(VAPictureParameterBufferH264 *pic, uint8_t *buf,
+ /*
+  * Generate PPS NAL unit from VAPictureParameterBufferH264
+  */
+-static size_t h264_generate_pps(VAPictureParameterBufferH264 *pic, uint8_t *buf, size_t bufsize) {
++static size_t h264_generate_pps(VAPictureParameterBufferH264 *pic, unsigned int l0_default,
++                                unsigned int l1_default, uint8_t *buf, size_t bufsize) {
+     BitWriter bw;
+     bw_init(&bw, buf, bufsize);
+ 
+@@ -246,8 +247,8 @@ static size_t h264_generate_pps(VAPictureParameterBufferH264 *pic, uint8_t *buf,
+     bw_put_ue(&bw, 0);  /* num_slice_groups_minus1 (FMO not supported) */
+ 
+     /* Use reasonable defaults for ref_idx */
+-    bw_put_ue(&bw, 0);  /* num_ref_idx_l0_default_active_minus1 */
+-    bw_put_ue(&bw, 0);  /* num_ref_idx_l1_default_active_minus1 */
++    bw_put_ue(&bw, l0_default);  /* num_ref_idx_l0_default_active_minus1 */
++    bw_put_ue(&bw, l1_default);  /* num_ref_idx_l1_default_active_minus1 */
+ 
+     bw_put_bits(&bw, pic->pic_fields.bits.weighted_pred_flag, 1);
+     bw_put_bits(&bw, pic->pic_fields.bits.weighted_bipred_idc, 2);
+@@ -275,9 +276,9 @@ static void h264_handle_picture_params(V4L2Context *ctx, V4L2Buffer *buf)
+ {
+     VAPictureParameterBufferH264 *pic = (VAPictureParameterBufferH264 *)buf->data;
+ 
+-    /* Generate and cache SPS/PPS */
++    /* Generate and cache the SPS; the PPS needs the slice parameters too */
+     ctx->h264.last_sps_size = h264_generate_sps(pic, ctx->h264.last_sps, sizeof(ctx->h264.last_sps));
+-    ctx->h264.last_pps_size = h264_generate_pps(pic, ctx->h264.last_pps, sizeof(ctx->h264.last_pps));
++    ctx->h264.pic = *pic;
+ 
+     LOG("H.264: Got picture params: %dx%d MBs, profile=%d, level=%d, refs=%d",
+         pic->picture_width_in_mbs_minus1 + 1,
+@@ -299,6 +300,29 @@ static void h264_handle_slice_data(V4L2Context *ctx, V4L2Buffer *buf)
+         return;
+     }
+ 
++    /*
++     * VA-API passes the reference list sizes each slice actually uses, not
++     * the PPS defaults. Slices that do not override them use the defaults,
++     * so a PPS whose defaults equal the values in use is always right
++     * (slices with an override ignore it). Take them from the first P/B
++     * slice and send a new PPS whenever they change.
++     */
++    for (unsigned int i = 0; i < ctx->last_slice_count; i++) {
++        unsigned int type = slice_params[i].slice_type % 5;  /* 0 P, 1 B, 2 I, 3 SP, 4 SI */
++        if (type == 0 || type == 3) {
++            ctx->h264.l0_default = slice_params[i].num_ref_idx_l0_active_minus1;
++            break;
++        }
++        if (type == 1) {
++            ctx->h264.l0_default = slice_params[i].num_ref_idx_l0_active_minus1;
++            ctx->h264.l1_default = slice_params[i].num_ref_idx_l1_active_minus1;
++            break;
++        }
++    }
++    ctx->h264.last_pps_size = h264_generate_pps(&ctx->h264.pic, ctx->h264.l0_default,
++                                                ctx->h264.l1_default, ctx->h264.last_pps,
++                                                sizeof(ctx->h264.last_pps));
++
+     for (unsigned int i = 0; i < ctx->last_slice_count; i++) {
+         VASliceParameterBufferH264 *sp = &slice_params[i];
+         uint8_t *slice_data = (uint8_t *)buf->data + sp->slice_data_offset;
+@@ -314,17 +338,22 @@ static void h264_handle_slice_data(V4L2Context *ctx, V4L2Buffer *buf)
+                 bitstream_append(&ctx->bitstream, ctx->h264.last_sps, ctx->h264.last_sps_size);
+                 LOG("H.264: Prepended SPS (%zu bytes)", ctx->h264.last_sps_size);
+             }
+-
+-            /* Append PPS */
+-            if (ctx->h264.last_pps_size > 0) {
+-                bitstream_append(&ctx->bitstream, NAL_START_CODE, sizeof(NAL_START_CODE));
+-                bitstream_append(&ctx->bitstream, ctx->h264.last_pps, ctx->h264.last_pps_size);
+-                LOG("H.264: Prepended PPS (%zu bytes)", ctx->h264.last_pps_size);
+-            }
+-
++            ctx->h264.sent_pps_size = 0;    /* force the PPS below */
+             ctx->h264.sps_pps_sent = true;
+         }
+ 
++        /* (Re)send the PPS before the first slice if it changed */
++        if (i == 0 && ctx->h264.sps_pps_sent && ctx->h264.last_pps_size > 0 &&
++            (ctx->h264.sent_pps_size != ctx->h264.last_pps_size ||
++             memcmp(ctx->h264.sent_pps, ctx->h264.last_pps, ctx->h264.last_pps_size))) {
++            bitstream_append(&ctx->bitstream, NAL_START_CODE, sizeof(NAL_START_CODE));
++            bitstream_append(&ctx->bitstream, ctx->h264.last_pps, ctx->h264.last_pps_size);
++            memcpy(ctx->h264.sent_pps, ctx->h264.last_pps, ctx->h264.last_pps_size);
++            ctx->h264.sent_pps_size = ctx->h264.last_pps_size;
++            LOG("H.264: Sent PPS (%zu bytes, ref idx defaults %u/%u)",
++                ctx->h264.last_pps_size, ctx->h264.l0_default, ctx->h264.l1_default);
++        }
++
+         /* Prepend NAL start code and append slice data */
+         bitstream_append(&ctx->bitstream, NAL_START_CODE, sizeof(NAL_START_CODE));
+         bitstream_append(&ctx->bitstream, slice_data, sp->slice_data_size);
+diff --git a/src/v4l2-backend.c b/src/v4l2-backend.c
+index d50116b..85e91da 100644
+--- a/src/v4l2-backend.c
++++ b/src/v4l2-backend.c
+@@ -21,6 +21,7 @@
+ #include <sys/mman.h>
+ #include <poll.h>
+ #include <linux/videodev2.h>
++#include <linux/dma-buf.h>
+ 
+ /* CIX Sky1 VPU fourcc values */
+ #define V4L2_PIX_FMT_AV1  v4l2_fourcc('A', 'V', '0', '1')
+@@ -134,6 +135,22 @@ int v4l2_probe_capabilities(V4L2Driver *drv, int fd)
+  */
+ int v4l2_setup_output_queue(V4L2Context *ctx)
+ {
++    /*
++     * VA-API expects every decoded picture right after its frame, in decode
++     * order. Ask for a display delay of 0 where the decoder supports it
++     * (otherwise it holds pictures back for reordering and the matching
++     * surface waits in vain, e.g. H.264 with B-frames).
++     */
++    struct v4l2_control dctrl = { .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE, .value = 1 };
++    if (ioctl(ctx->v4l2_fd, VIDIOC_S_CTRL, &dctrl) == 0) {
++        dctrl.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
++        dctrl.value = 0;
++        if (ioctl(ctx->v4l2_fd, VIDIOC_S_CTRL, &dctrl) == 0)
++            LOG("Decoder outputs pictures in decode order");
++    } else {
++        LOG("Decoder has no display delay control: %s", strerror(errno));
++    }
++
+     /* Subscribe to source change events (required for proper decoder operation) */
+     struct v4l2_event_subscription sub;
+     memset(&sub, 0, sizeof(sub));
+@@ -224,6 +241,8 @@ int v4l2_setup_output_queue(V4L2Context *ctx)
+     return 0;
+ }
+ 
++static bool surface_fits(V4L2Context *ctx, V4L2Surface *surface);
++
+ /*
+  * Setup CAPTURE queue (decoded frame output)
+  */
+@@ -251,20 +270,70 @@ int v4l2_setup_capture_queue(V4L2Context *ctx)
+             fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height, fmt.fmt.pix_mp.pixelformat);
+     }
+ 
+-    /* Request CAPTURE buffers with DMABUF export */
++    /*
++     * Remember the real layout. Decoders such as Qualcomm iris return NV12
++     * in a single plane with aligned rows (1920x1080 -> 1088 rows), others
++     * (CIX Sky1) use two planes.
++     */
++    ctx->cap_num_planes = fmt.fmt.pix_mp.num_planes ? fmt.fmt.pix_mp.num_planes : 1;
++    ctx->cap_stride[0] = fmt.fmt.pix_mp.plane_fmt[0].bytesperline ?
++                         fmt.fmt.pix_mp.plane_fmt[0].bytesperline : fmt.fmt.pix_mp.width;
++    ctx->cap_stride[1] = (ctx->cap_num_planes > 1 && fmt.fmt.pix_mp.plane_fmt[1].bytesperline) ?
++                         fmt.fmt.pix_mp.plane_fmt[1].bytesperline : ctx->cap_stride[0];
++    ctx->cap_height = fmt.fmt.pix_mp.height;
++    ctx->cap_uv_offset = (size_t)ctx->cap_stride[0] * ctx->cap_height;
++    LOG("CAPTURE layout: %u plane(s), stride %u/%u, %u rows, UV offset %zu",
++        ctx->cap_num_planes, ctx->cap_stride[0], ctx->cap_stride[1],
++        ctx->cap_height, ctx->cap_uv_offset);
++
++    ctx->cap_size = fmt.fmt.pix_mp.plane_fmt[0].sizeimage;
++
++    /*
++     * Use DMABUF mode when the surfaces waiting for a picture own buffers in
++     * the decoder's layout (Chromium); otherwise the decoder allocates.
++     */
++    ctx->cap_dmabuf = false;
++    if (ctx->cap_num_planes == 1) {
++        int pending = 0, fitting = 0;
++        for (int i = 0; i < TS_MAP_SIZE; i++) {
++            V4L2Surface *surface = ctx->ts_map[i].surface;
++            if (surface == NULL)
++                continue;
++            pending++;
++            if (surface_fits(ctx, surface))
++                fitting++;
++        }
++        ctx->cap_dmabuf = pending > 0 && fitting == pending;
++    }
++
+     struct v4l2_requestbuffers reqbufs;
+     memset(&reqbufs, 0, sizeof(reqbufs));
+-    reqbufs.count = MAX_CAPTURE_BUFFERS;
++    reqbufs.count = ctx->cap_dmabuf ? MAX_CAPTURE_BUFFERS : MMAP_CAPTURE_BUFFERS;
+     reqbufs.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+-    reqbufs.memory = V4L2_MEMORY_MMAP;
++    reqbufs.memory = ctx->cap_dmabuf ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+ 
+     if (ioctl(ctx->v4l2_fd, VIDIOC_REQBUFS, &reqbufs) < 0) {
+         LOG("Failed to request CAPTURE buffers: %s", strerror(errno));
+         return -1;
+     }
++    if (reqbufs.count > MAX_CAPTURE_BUFFERS)
++        reqbufs.count = MAX_CAPTURE_BUFFERS;
+ 
+     ctx->num_capture_buffers = reqbufs.count;
+-    LOG("Allocated %d CAPTURE buffers", ctx->num_capture_buffers);
++    LOG("Allocated %d CAPTURE buffers (%s)", ctx->num_capture_buffers,
++        ctx->cap_dmabuf ? "DMABUF, surface-owned" : "MMAP");
++
++    for (int i = 0; i < ctx->num_capture_buffers; i++) {
++        ctx->capture_buffers[i].index = i;
++        ctx->capture_buffers[i].fd = -1;
++        ctx->capture_buffers[i].queued = false;
++        ctx->cap_slot[i] = NULL;
++    }
++
++    if (ctx->cap_dmabuf) {
++        v4l2_feed_capture(ctx);
++        return 0;
++    }
+ 
+     /* Queue all CAPTURE buffers */
+     for (int i = 0; i < ctx->num_capture_buffers; i++) {
+@@ -279,17 +348,6 @@ int v4l2_setup_capture_queue(V4L2Context *ctx)
+         buf.length = 2;
+         buf.m.planes = planes;
+ 
+-        if (ioctl(ctx->v4l2_fd, VIDIOC_QUERYBUF, &buf) < 0) {
+-            LOG("Failed to query CAPTURE buffer %d: %s", i, strerror(errno));
+-            /* Continue anyway - might be single plane */
+-        }
+-
+-        ctx->capture_buffers[i].index = i;
+-        ctx->capture_buffers[i].fd = -1;
+-        ctx->capture_buffers[i].queued = false;
+-
+-        /* Queue the buffer */
+-        buf.index = i;
+         if (ioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf) < 0) {
+             LOG("Failed to queue CAPTURE buffer %d: %s", i, strerror(errno));
+         } else {
+@@ -301,6 +359,101 @@ int v4l2_setup_capture_queue(V4L2Context *ctx)
+     return 0;
+ }
+ 
++static int qbuf_dmabuf(V4L2Context *ctx, int idx, V4L2Surface *surface)
++{
++    struct v4l2_buffer buf;
++    struct v4l2_plane planes[1];
++
++    memset(&buf, 0, sizeof(buf));
++    memset(&planes, 0, sizeof(planes));
++    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++    buf.memory = V4L2_MEMORY_DMABUF;
++    buf.index = idx;
++    buf.length = 1;
++    buf.m.planes = planes;
++    planes[0].m.fd = surface->own_fd;
++    planes[0].length = surface->own_size;
++
++    if (ioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf) < 0) {
++        LOG("Failed to queue DMABUF CAPTURE buffer %d: %s", idx, strerror(errno));
++        return -1;
++    }
++    ctx->cap_slot[idx] = surface;
++    ctx->capture_buffers[idx].queued = true;
++    return 0;
++}
++
++static bool surface_fits(V4L2Context *ctx, V4L2Surface *surface)
++{
++    return surface->own_ptr != NULL && surface->own_size >= ctx->cap_size &&
++           surface->own_stride == ctx->cap_stride[0] &&
++           surface->own_uv_offset == ctx->cap_uv_offset;
++}
++
++/*
++ * DMABUF mode: keep exactly one CAPTURE buffer queued, the own buffer of the
++ * oldest frame still waiting for its picture. The firmware also returns
++ * empty buffers (no timestamp) at unpredictable points; with several queued
++ * those would shift every following picture into the wrong surface, while a
++ * single buffer is simply queued again. Called with ctx->mutex held.
++ */
++void v4l2_feed_capture(V4L2Context *ctx)
++{
++    if (!ctx->cap_dmabuf || !ctx->streaming_output)
++        return;
++
++    for (int i = 0; i < ctx->num_capture_buffers; i++)
++        if (ctx->capture_buffers[i].queued)
++            return;
++
++    V4L2Surface *oldest = NULL;
++    uint64_t oldest_ts = 0;
++    for (int i = 0; i < TS_MAP_SIZE; i++) {
++        if (ctx->ts_map[i].surface &&
++            (oldest == NULL || ctx->ts_map[i].ts < oldest_ts)) {
++            oldest = ctx->ts_map[i].surface;
++            oldest_ts = ctx->ts_map[i].ts;
++        }
++    }
++    if (oldest == NULL)
++        return;
++
++    if (!surface_fits(ctx, oldest)) {
++        LOG("Surface buffer does not fit the CAPTURE layout");
++        return;
++    }
++
++    /* Reuse the surface's slot so its dmabuf stays attached */
++    int idx = -1;
++    for (int i = 0; idx < 0 && i < ctx->num_capture_buffers; i++)
++        if (ctx->cap_slot[i] == oldest)
++            idx = i;
++    for (int i = 0; idx < 0 && i < ctx->num_capture_buffers; i++)
++        if (ctx->cap_slot[i] == NULL)
++            idx = i;
++    if (idx < 0) {
++        /* All slots taken by other surfaces: recycle the first one */
++        idx = 0;
++    }
++
++    qbuf_dmabuf(ctx, idx, oldest);
++}
++
++/*
++ * Drop every reference to a surface that is being destroyed.
++ */
++void v4l2_forget_surface(V4L2Context *ctx, V4L2Surface *surface)
++{
++    for (int i = 0; i < TS_MAP_SIZE; i++)
++        if (ctx->ts_map[i].surface == surface)
++            ctx->ts_map[i].surface = NULL;
++    for (int i = 0; i < ctx->num_capture_buffers; i++)
++        if (ctx->cap_slot[i] == surface)
++            ctx->cap_slot[i] = NULL;
++    if (ctx->render_target == surface)
++        ctx->render_target = NULL;
++}
++
+ /*
+  * Dequeue any completed OUTPUT buffers to make them available for reuse
+  */
+@@ -378,8 +531,13 @@ int v4l2_queue_bitstream(V4L2Context *ctx, void *data, size_t size)
+                     LOG("Reclaimed OUTPUT buffer %d after wait", buf_idx);
+                 }
+             } else if (errno == EAGAIN) {
+-                /* No buffer ready, wait a bit */
+-                usleep(10000);  /* 10ms */
++                /*
++                 * The decoder may be waiting for a CAPTURE buffer before it
++                 * releases input: collect pictures (which also hands out the
++                 * next DMABUF-mode buffer), then wait a bit.
++                 */
++                if (v4l2_dequeue_any(ctx, 10) < 0)
++                    usleep(1000);
+             } else {
+                 LOG("Error waiting for OUTPUT buffer: %s", strerror(errno));
+                 break;
+@@ -412,6 +570,8 @@ int v4l2_queue_bitstream(V4L2Context *ctx, void *data, size_t size)
+     buf.length = 1;
+     buf.m.planes = planes;
+     planes[0].bytesused = size;
++    buf.timestamp.tv_sec = ctx->cur_ts / 1000000;
++    buf.timestamp.tv_usec = ctx->cur_ts % 1000000;
+ 
+     if (ioctl(ctx->v4l2_fd, VIDIOC_QBUF, &buf) < 0) {
+         LOG("Failed to queue OUTPUT buffer: %s", strerror(errno));
+@@ -479,49 +639,109 @@ int v4l2_queue_bitstream(V4L2Context *ctx, void *data, size_t size)
+ /*
+  * Dequeue decoded frame with poll() for proper waiting
+  */
+-int v4l2_dequeue_frame(V4L2Context *ctx, V4L2Surface *surface)
++/*
++ * Dequeue one decoded picture, if any arrives within timeout_ms (0: do not
++ * wait), and attach it to the surface whose frame produced it. Returns 0 if a
++ * CAPTURE buffer was dequeued, -1 otherwise. Called with ctx->mutex held.
++ */
++int v4l2_dequeue_any(V4L2Context *ctx, int timeout_ms)
+ {
+     struct v4l2_buffer buf;
+     struct v4l2_plane planes[2];
+ 
+-    /* Use poll() to wait for a decoded frame (up to 500ms) */
++    if (!ctx->streaming_capture)
++        return -1;
++
+     struct pollfd pfd = {
+         .fd = ctx->v4l2_fd,
+-        .events = POLLIN | POLLPRI,
++        .events = POLLIN,
+     };
+-
+-    int ret = poll(&pfd, 1, 500);
+-    if (ret <= 0) {
+-        if (ret == 0) {
+-            LOG("poll() timeout - no frame ready");
+-            return -1;
+-        }
+-        LOG("poll() error: %s", strerror(errno));
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0 || !(pfd.revents & POLLIN))
+         return -1;
+-    }
+-
+-    if (!(pfd.revents & POLLIN)) {
+-        LOG("poll() no POLLIN, revents=0x%x", pfd.revents);
+-        return -1;
+-    }
+ 
+     memset(&buf, 0, sizeof(buf));
+     memset(&planes, 0, sizeof(planes));
+     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+-    buf.memory = V4L2_MEMORY_MMAP;
+-    buf.length = 2;
++    buf.memory = ctx->cap_dmabuf ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
++    buf.length = ctx->cap_dmabuf ? 1 : 2;
+     buf.m.planes = planes;
+ 
+     if (ioctl(ctx->v4l2_fd, VIDIOC_DQBUF, &buf) < 0) {
+-        if (errno != EAGAIN) {
++        if (errno != EAGAIN)
+             LOG("Failed to dequeue CAPTURE buffer: %s", strerror(errno));
+-        }
+         return -1;
+     }
++    ctx->capture_buffers[buf.index].queued = false;
+ 
+-    surface->capture_idx = buf.index;
++    uint64_t ts = (uint64_t)buf.timestamp.tv_sec * 1000000 + buf.timestamp.tv_usec;
++    V4L2Surface *surface = NULL;
++    for (int i = 0; i < TS_MAP_SIZE; i++) {
++        if (ctx->ts_map[i].surface && ctx->ts_map[i].ts == ts) {
++            surface = ctx->ts_map[i].surface;
++            ctx->ts_map[i].surface = NULL;
++            break;
++        }
++    }
++
++    if (ctx->cap_dmabuf) {
++        V4L2Surface *owner = ctx->cap_slot[buf.index];
++        bool good = surface != NULL && planes[0].bytesused != 0 &&
++                    !(buf.flags & V4L2_BUF_FLAG_ERROR);
++
++        if (good && owner != surface) {
++            /* Filled out of order: move the picture to its surface */
++            LOG("CAPTURE buffer %u (ts %llu) landed in another surface, copying",
++                buf.index, (unsigned long long)ts);
++            if (owner != NULL) {
++                struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW };
++                ioctl(owner->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++                ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++                memcpy(surface->own_ptr, owner->own_ptr, ctx->cap_size);
++                sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
++                ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++                ioctl(owner->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++            }
++        }
++        if (!good)
++            LOG("CAPTURE buffer %u (ts %llu, %u bytes, flags 0x%x) has no picture",
++                buf.index, (unsigned long long)ts, planes[0].bytesused, buf.flags);
++
++        if (good) {
++            pthread_mutex_lock(&surface->mutex);
++            surface->capture_idx = -1;
++            surface->decoded = true;
++            pthread_cond_broadcast(&surface->cond);
++            pthread_mutex_unlock(&surface->mutex);
++        }
++
++        /* Next buffer: the oldest waiting frame (possibly the same again) */
++        v4l2_feed_capture(ctx);
++        return 0;
++    }
++
++    if (surface == NULL || planes[0].bytesused == 0 ||
++        (buf.flags & V4L2_BUF_FLAG_ERROR)) {
++        LOG("CAPTURE buffer %u (ts %llu, %u bytes, flags 0x%x) has no surface, requeue",
++            buf.index, (unsigned long long)ts, planes[0].bytesused, buf.flags);
++        v4l2_requeue_capture(ctx, buf.index);
++        return 0;
++    }
++
++    pthread_mutex_lock(&surface->mutex);
++    if (surface->capture_idx >= 0 && surface->capture_idx != (int)buf.index)
++        v4l2_requeue_capture(ctx, surface->capture_idx);
++    if (surface->own_ptr != NULL) {
++        /* The surface has its own buffer: copy, and hand the CAPTURE buffer back */
++        v4l2_copy_to_own(ctx, buf.index, surface);
++        v4l2_requeue_capture(ctx, buf.index);
++        surface->capture_idx = -1;
++    } else {
++        surface->capture_idx = buf.index;
++    }
+     surface->decoded = true;
+-    ctx->capture_buffers[buf.index].queued = false;
++    pthread_cond_broadcast(&surface->cond);
++    pthread_mutex_unlock(&surface->mutex);
+ 
+     return 0;
+ }
+@@ -540,6 +760,10 @@ int v4l2_requeue_capture(V4L2Context *ctx, int capture_idx)
+     if (ctx->capture_buffers[capture_idx].queued)
+         return 0;  /* Already queued */
+ 
++    if (ctx->cap_dmabuf)
++        return ctx->cap_slot[capture_idx] ?
++               qbuf_dmabuf(ctx, capture_idx, ctx->cap_slot[capture_idx]) : -1;
++
+     struct v4l2_buffer buf;
+     struct v4l2_plane planes[2];
+     memset(&buf, 0, sizeof(buf));
+@@ -559,6 +783,102 @@ int v4l2_requeue_capture(V4L2Context *ctx, int capture_idx)
+     return 0;
+ }
+ 
++/*
++ * mmap a CAPTURE buffer for CPU reads; the mapping is cached in the buffer.
++ * One-plane NV12 keeps UV inside plane 0 (plane1_ptr stays NULL).
++ */
++int v4l2_map_capture(V4L2Context *ctx, int capture_idx)
++{
++    V4L2MmapBuffer *cap_buf = &ctx->capture_buffers[capture_idx];
++    bool one_plane = ctx->cap_num_planes == 1;
++
++    if (cap_buf->plane0_ptr != NULL && (one_plane || cap_buf->plane1_ptr != NULL))
++        return 0;
++
++    struct v4l2_buffer buf;
++    struct v4l2_plane planes[2];
++    memset(&buf, 0, sizeof(buf));
++    memset(&planes, 0, sizeof(planes));
++    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
++    buf.memory = V4L2_MEMORY_MMAP;
++    buf.index = capture_idx;
++    buf.length = 2;
++    buf.m.planes = planes;
++
++    if (ioctl(ctx->v4l2_fd, VIDIOC_QUERYBUF, &buf) < 0) {
++        LOG("Failed to query CAPTURE buffer %d: %s", capture_idx, strerror(errno));
++        return -1;
++    }
++
++    void *y_plane = mmap(NULL, planes[0].length, PROT_READ, MAP_SHARED,
++                         ctx->v4l2_fd, planes[0].m.mem_offset);
++    if (y_plane == MAP_FAILED) {
++        LOG("Failed to mmap Y plane: %s", strerror(errno));
++        return -1;
++    }
++
++    void *uv_plane = NULL;
++    if (!one_plane) {
++        uv_plane = mmap(NULL, planes[1].length, PROT_READ, MAP_SHARED,
++                        ctx->v4l2_fd, planes[1].m.mem_offset);
++        if (uv_plane == MAP_FAILED) {
++            munmap(y_plane, planes[0].length);
++            LOG("Failed to mmap UV plane: %s", strerror(errno));
++            return -1;
++        }
++    }
++
++    cap_buf->plane0_ptr = y_plane;
++    cap_buf->plane0_len = planes[0].length;
++    cap_buf->plane1_ptr = uv_plane;
++    cap_buf->plane1_len = one_plane ? 0 : planes[1].length;
++
++    LOG("Cached mmap for CAPTURE buffer %d (%u plane(s), %zu/%zu bytes)",
++        capture_idx, ctx->cap_num_planes, cap_buf->plane0_len, cap_buf->plane1_len);
++    return 0;
++}
++
++static void copy_plane(uint8_t *dst, size_t dst_pitch, const uint8_t *src,
++                       size_t src_pitch, size_t width, size_t rows)
++{
++    for (size_t y = 0; y < rows; y++)
++        memcpy(dst + y * dst_pitch, src + y * src_pitch, width);
++}
++
++/*
++ * Copy a decoded picture from a CAPTURE buffer into the surface's own buffer.
++ */
++void v4l2_copy_to_own(V4L2Context *ctx, int capture_idx, V4L2Surface *surface)
++{
++    if (v4l2_map_capture(ctx, capture_idx) < 0)
++        return;
++
++    V4L2MmapBuffer *cap_buf = &ctx->capture_buffers[capture_idx];
++    const uint8_t *src_y = cap_buf->plane0_ptr;
++    const uint8_t *src_uv = ctx->cap_num_planes == 1 ?
++                            src_y + ctx->cap_uv_offset : cap_buf->plane1_ptr;
++
++    size_t width = surface->width;
++    size_t rows = surface->height;
++    if (width > ctx->cap_stride[0])
++        width = ctx->cap_stride[0];
++    if (width > surface->own_stride)
++        width = surface->own_stride;
++    if (rows > ctx->cap_height)
++        rows = ctx->cap_height;
++
++    struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE };
++    ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++
++    copy_plane(surface->own_ptr, surface->own_stride, src_y, ctx->cap_stride[0],
++               width, rows);
++    copy_plane(surface->own_ptr + surface->own_uv_offset, surface->own_stride,
++               src_uv, ctx->cap_stride[1], width, (rows + 1) / 2);
++
++    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
++    ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++}
++
+ /*
+  * Export CAPTURE buffer as DMABuf
+  */
+@@ -576,7 +896,7 @@ int v4l2_export_dmabuf(V4L2Context *ctx, int capture_idx)
+         return -1;
+     }
+ 
+-    ctx->capture_buffers[capture_idx].fd = expbuf.fd;
++    /* The VA-API caller owns (and closes) exported fds */
+     return expbuf.fd;
+ }
+ 
+diff --git a/src/vabackend.c b/src/vabackend.c
+index aa13c73..9bb14cd 100644
+--- a/src/vabackend.c
++++ b/src/vabackend.c
+@@ -14,6 +14,7 @@
+ 
+ #include "vabackend.h"
+ 
++#include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -29,6 +30,10 @@
+ #include <va/va_drmcommon.h>
+ #include <linux/videodev2.h>
+ #include <drm_fourcc.h>
++#include <gbm.h>
++#include <linux/dma-buf.h>
++
++#define ALIGN_UP(x, a) (((x) + (a) - 1) / (a) * (a))
+ 
+ /* Logging */
+ static FILE *log_output = NULL;
+@@ -133,6 +138,14 @@ static VAGenericID allocate_surface_id(V4L2Driver *drv)
+     return VA_INVALID_ID;
+ }
+ 
++/*
++ * A slot handed out by allocate_buffer_id() but not filled in yet. Reserving
++ * it under the lock keeps two threads (e.g. FFmpeg's decoder thread creating
++ * parameter buffers and its output thread creating images) from getting the
++ * same ID.
++ */
++#define BUFFER_RESERVED ((V4L2Buffer *)(uintptr_t)1)
++
+ static VAGenericID allocate_buffer_id(V4L2Driver *drv)
+ {
+     VAGenericID id = VA_INVALID_ID;
+@@ -140,6 +153,7 @@ static VAGenericID allocate_buffer_id(V4L2Driver *drv)
+     pthread_mutex_lock(&drv->mutex);
+     for (int i = 0; i < MAX_BUFFERS; i++) {
+         if (drv->buffers[i] == NULL) {
++            drv->buffers[i] = BUFFER_RESERVED;
+             id = i + 1 + 0x3000;
+             break;
+         }
+@@ -181,7 +195,7 @@ static V4L2Surface *get_surface(V4L2Driver *drv, VASurfaceID id)
+ static V4L2Buffer *get_buffer(V4L2Driver *drv, VABufferID id)
+ {
+     int idx = BUFFER_INDEX(id);
+-    if (idx >= 0 && idx < MAX_BUFFERS)
++    if (idx >= 0 && idx < MAX_BUFFERS && drv->buffers[idx] != BUFFER_RESERVED)
+         return drv->buffers[idx];
+     return NULL;
+ }
+@@ -217,7 +231,9 @@ static VAStatus v4l2_Terminate(VADriverContextP ctx)
+ 
+     /* Clean up any remaining buffers */
+     for (int i = 0; i < MAX_BUFFERS; i++) {
+-        if (drv->buffers[i]) {
++        if (drv->buffers[i] == BUFFER_RESERVED) {
++            drv->buffers[i] = NULL;
++        } else if (drv->buffers[i]) {
+             free(drv->buffers[i]->data);
+             free(drv->buffers[i]);
+             drv->buffers[i] = NULL;
+@@ -230,6 +246,8 @@ static VAStatus v4l2_Terminate(VADriverContextP ctx)
+     }
+ 
+     pthread_mutex_destroy(&drv->mutex);
++    if (drv->gbm != NULL)
++        gbm_device_destroy(drv->gbm);
+     free(drv);
+     ctx->pDriverData = NULL;
+ 
+@@ -270,6 +288,9 @@ static VAStatus v4l2_QueryConfigEntrypoints(
+     return VA_STATUS_SUCCESS;
+ }
+ 
++static VAStatus v4l2_GetConfigAttributes(VADriverContextP ctx, VAProfile profile,
++    VAEntrypoint entrypoint, VAConfigAttrib *attrib_list, int num_attribs);
++
+ static VAStatus v4l2_QueryConfigAttributes(
+     VADriverContextP ctx,
+     VAConfigID config,
+@@ -286,9 +307,13 @@ static VAStatus v4l2_QueryConfigAttributes(
+ 
+     *profile = cfg->profile;
+     *entrypoint = cfg->entrypoint;
+-    *num_attribs = 0;
+ 
+-    return VA_STATUS_SUCCESS;
++    /* Chromium takes the supported RT formats from this list */
++    attrib_list[0].type = VAConfigAttribRTFormat;
++    *num_attribs = 1;
++
++    return v4l2_GetConfigAttributes(ctx, cfg->profile, cfg->entrypoint,
++                                    attrib_list, 1);
+ }
+ 
+ static VAStatus v4l2_GetConfigAttributes(
+@@ -385,6 +410,8 @@ static VAStatus v4l2_DestroyConfig(
+     return VA_STATUS_SUCCESS;
+ }
+ 
++static int surface_alloc_own(V4L2Driver *drv, V4L2Surface *surface);
++
+ static VAStatus v4l2_CreateSurfaces(
+     VADriverContextP ctx,
+     int width,
+@@ -409,6 +436,7 @@ static VAStatus v4l2_CreateSurfaces(
+         surface->fourcc = V4L2_PIX_FMT_NV12;  /* Default to NV12 */
+         surface->capture_idx = -1;
+         surface->dmabuf_fd = -1;
++        surface->own_fd = -1;
+         surface->decoded = false;
+         surface->no_output = false;
+         surface->cached_image = VA_INVALID_ID;
+@@ -417,6 +445,10 @@ static VAStatus v4l2_CreateSurfaces(
+ 
+         drv->surfaces[SURFACE_INDEX(id)] = surface;
+         surfaces[i] = id;
++
++        /* Testing: take the Chromium (DMABUF) path with any application */
++        if (getenv("V4L2VA_OWN_BUFFERS") != NULL)
++            surface_alloc_own(drv, surface);
+     }
+ 
+     LOG("Created %d surfaces (%dx%d)", num_surfaces, width, height);
+@@ -449,13 +481,23 @@ static VAStatus v4l2_DestroySurfaces(
+         if (idx >= 0 && idx < MAX_SURFACES && drv->surfaces[idx]) {
+             V4L2Surface *surface = drv->surfaces[idx];
+             /* Return any outstanding CAPTURE buffer to the queue */
+-            if (surface->context && surface->capture_idx >= 0) {
+-                v4l2_requeue_capture(surface->context, surface->capture_idx);
++            if (surface->context) {
++                pthread_mutex_lock(&surface->context->mutex);
++                if (surface->capture_idx >= 0)
++                    v4l2_requeue_capture(surface->context, surface->capture_idx);
++                v4l2_forget_surface(surface->context, surface);
++                pthread_mutex_unlock(&surface->context->mutex);
+             }
+             surface->cached_image = VA_INVALID_ID;
+             if (surface->dmabuf_fd >= 0) {
+                 close(surface->dmabuf_fd);
+             }
++            if (surface->own_ptr != NULL)
++                munmap(surface->own_ptr, surface->own_size);
++            if (surface->own_fd >= 0)
++                close(surface->own_fd);
++            if (surface->own_bo != NULL)
++                gbm_bo_destroy(surface->own_bo);
+             pthread_mutex_destroy(&surface->mutex);
+             pthread_cond_destroy(&surface->cond);
+             free(surface);
+@@ -536,6 +578,15 @@ static VAStatus v4l2_DestroyContext(
+ 
+     V4L2Context *context = drv->contexts[idx];
+ 
++    /* Surfaces outlive the context: detach them (their CAPTURE buffers go away) */
++    for (int i = 0; i < MAX_SURFACES; i++) {
++        V4L2Surface *surface = drv->surfaces[i];
++        if (surface != NULL && surface->context == context) {
++            surface->context = NULL;
++            surface->capture_idx = -1;
++        }
++    }
++
+     /* Stop streaming */
+     if (context->streaming_output) {
+         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+@@ -732,7 +783,8 @@ static VAStatus v4l2_DestroyBuffer(
+     int idx = BUFFER_INDEX(buf_id);
+ 
+     pthread_mutex_lock(&drv->mutex);
+-    if (idx < 0 || idx >= MAX_BUFFERS || drv->buffers[idx] == NULL) {
++    if (idx < 0 || idx >= MAX_BUFFERS || drv->buffers[idx] == NULL ||
++        drv->buffers[idx] == BUFFER_RESERVED) {
+         pthread_mutex_unlock(&drv->mutex);
+         return VA_STATUS_SUCCESS;
+     }
+@@ -859,6 +911,14 @@ static VAStatus v4l2_EndPicture(
+         context->codec->prepare_bitstream(context);
+     }
+ 
++    /* Tag the frame so its picture finds the right surface */
++    context->cur_ts = ++context->ts_next;
++    if (context->render_target && !context->render_target->no_output) {
++        int slot = context->cur_ts % TS_MAP_SIZE;
++        context->ts_map[slot].ts = context->cur_ts;
++        context->ts_map[slot].surface = context->render_target;
++    }
++
+     /* Submit bitstream to V4L2 OUTPUT queue */
+     if (context->bitstream.size > 0) {
+         int ret = v4l2_queue_bitstream(context, context->bitstream.data,
+@@ -870,9 +930,30 @@ static VAStatus v4l2_EndPicture(
+         }
+     }
+ 
+-    /* Try to dequeue a decoded frame */
+-    if (context->render_target) {
+-        v4l2_dequeue_frame(context, context->render_target);
++    if (context->streaming_capture)
++        v4l2_feed_capture(context);
++
++    /* Hidden frames (VP9 show_frame = 0) never produce a picture */
++    if (context->render_target && context->render_target->no_output)
++        context->render_target->decoded = true;
++
++    /* Collect pictures that are already done, without waiting */
++    while (v4l2_dequeue_any(context, 0) == 0)
++        ;
++
++    /*
++     * Chromium never calls vaSyncSurface: it shows the surface's dmabuf
++     * once vaEndPicture returns, relying on implicit fences that a V4L2
++     * decoder does not set. For surfaces it owns (DMABUF mode), finish the
++     * picture here; with decode-order output it never waits for later input.
++     */
++    V4L2Surface *target = context->render_target;
++    if (context->cap_dmabuf && target != NULL && target->own_ptr != NULL &&
++        !target->no_output) {
++        for (int i = 0; i < 100 && !target->decoded; i++)
++            v4l2_dequeue_any(context, 10);
++        if (!target->decoded)
++            LOG("EndPicture: picture for surface %p did not arrive", (void *)target);
+     }
+ 
+     pthread_mutex_unlock(&context->mutex);
+@@ -902,25 +983,18 @@ static VAStatus v4l2_SyncSurface(
+     V4L2Context *context = surface->context;
+     int retries = 50;  /* 500ms max wait */
+ 
+-    while (!surface->decoded && retries-- > 0) {
++    while (!surface->decoded && !surface->no_output && retries-- > 0) {
+         pthread_mutex_unlock(&surface->mutex);
+ 
++        /* Any picture that arrives goes to its own surface */
+         pthread_mutex_lock(&context->mutex);
+-        v4l2_dequeue_frame(context, surface);
++        v4l2_dequeue_any(context, 10);
+         pthread_mutex_unlock(&context->mutex);
+ 
+         pthread_mutex_lock(&surface->mutex);
+-        if (!surface->decoded) {
+-            struct timespec ts;
+-            clock_gettime(CLOCK_REALTIME, &ts);
+-            ts.tv_nsec += 10000000;  /* 10ms */
+-            if (ts.tv_nsec >= 1000000000) {
+-                ts.tv_sec++;
+-                ts.tv_nsec -= 1000000000;
+-            }
+-            pthread_cond_timedwait(&surface->cond, &surface->mutex, &ts);
+-        }
+     }
++    if (!surface->decoded && !surface->no_output)
++        LOG("SyncSurface: no picture for surface %d", render_target);
+ 
+     /* Mark as ready after timeout to prevent hangs */
+     surface->decoded = true;
+@@ -1077,11 +1151,21 @@ static VAStatus v4l2_DeriveImage(
+     image->width = surface->width;
+     image->height = surface->height;
+     image->num_planes = 2;
+-    image->pitches[0] = surface->width;  /* Y plane stride */
+-    image->pitches[1] = surface->width;  /* UV plane stride */
+-    image->offsets[0] = 0;
+-    image->offsets[1] = surface->width * surface->height;  /* UV offset */
+-    image->data_size = surface->width * surface->height * 3 / 2;
++    if (surface->context->cap_num_planes == 1) {
++        /* One-plane NV12: the mapping covers both, with the decoder's layout */
++        V4L2Context *c = surface->context;
++        image->pitches[0] = c->cap_stride[0];
++        image->pitches[1] = c->cap_stride[1];
++        image->offsets[0] = 0;
++        image->offsets[1] = c->cap_uv_offset;
++        image->data_size = c->cap_uv_offset + (size_t)c->cap_stride[1] * (c->cap_height / 2);
++    } else {
++        image->pitches[0] = surface->width;  /* Y plane stride */
++        image->pitches[1] = surface->width;  /* UV plane stride */
++        image->offsets[0] = 0;
++        image->offsets[1] = surface->width * surface->height;  /* UV offset */
++        image->data_size = surface->width * surface->height * 3 / 2;
++    }
+ 
+     /* Create a buffer object to track this */
+     V4L2Buffer *buffer = calloc(1, sizeof(V4L2Buffer));
+@@ -1109,7 +1193,8 @@ static VAStatus v4l2_DestroyImage(
+     VADriverContextP ctx,
+     VAImageID image)
+ {
+-    return VA_STATUS_SUCCESS;
++    /* Images share their ID with their data buffer (see CreateImage) */
++    return v4l2_DestroyBuffer(ctx, image);
+ }
+ 
+ static VAStatus v4l2_SetImagePalette(
+@@ -1151,81 +1236,78 @@ static VAStatus v4l2_GetImage(
+     }
+ 
+     V4L2Context *context = surface->context;
+-
+-    if (surface->capture_idx < 0 || surface->capture_idx >= context->num_capture_buffers) {
+-        LOG("GetImage: Invalid capture_idx %d", surface->capture_idx);
+-        return VA_STATUS_ERROR_INVALID_SURFACE;
+-    }
+-
+-    /* Get cached mmap or create new one */
+-    V4L2MmapBuffer *cap_buf = &context->capture_buffers[surface->capture_idx];
+-    void *y_plane = cap_buf->plane0_ptr;
+-    void *uv_plane = cap_buf->plane1_ptr;
+-
+-    if (y_plane == NULL || uv_plane == NULL) {
+-        /* Need to mmap the CAPTURE buffer planes */
+-        struct v4l2_buffer buf;
+-        struct v4l2_plane planes[2];
+-        memset(&buf, 0, sizeof(buf));
+-        memset(&planes, 0, sizeof(planes));
+-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+-        buf.memory = V4L2_MEMORY_MMAP;
+-        buf.index = surface->capture_idx;
+-        buf.length = 2;  /* NM12 has 2 planes */
+-        buf.m.planes = planes;
+-
+-        if (ioctl(context->v4l2_fd, VIDIOC_QUERYBUF, &buf) < 0) {
+-            LOG("GetImage: Failed to query CAPTURE buffer: %s", strerror(errno));
+-            return VA_STATUS_ERROR_OPERATION_FAILED;
++    const uint8_t *y_plane, *uv_plane;
++    uint32_t stride[2], src_rows;
++    size_t y_len, uv_len;
++
++    if (surface->own_ptr != NULL) {
++        /* Picture is in the surface's own buffer */
++        y_plane = surface->own_ptr;
++        uv_plane = surface->own_ptr + surface->own_uv_offset;
++        stride[0] = stride[1] = surface->own_stride;
++        src_rows = surface->own_uv_offset / surface->own_stride;
++        y_len = surface->own_uv_offset;
++        uv_len = surface->own_size - surface->own_uv_offset;
++
++        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
++        ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
++    } else {
++        if (surface->capture_idx < 0 || surface->capture_idx >= context->num_capture_buffers) {
++            LOG("GetImage: Invalid capture_idx %d", surface->capture_idx);
++            return VA_STATUS_ERROR_INVALID_SURFACE;
+         }
+-
+-        y_plane = mmap(NULL, planes[0].length, PROT_READ, MAP_SHARED,
+-                       context->v4l2_fd, planes[0].m.mem_offset);
+-        if (y_plane == MAP_FAILED) {
+-            LOG("GetImage: Failed to mmap Y plane: %s", strerror(errno));
++        if (v4l2_map_capture(context, surface->capture_idx) < 0)
+             return VA_STATUS_ERROR_OPERATION_FAILED;
+-        }
+ 
+-        uv_plane = mmap(NULL, planes[1].length, PROT_READ, MAP_SHARED,
+-                        context->v4l2_fd, planes[1].m.mem_offset);
+-        if (uv_plane == MAP_FAILED) {
+-            munmap(y_plane, planes[0].length);
+-            LOG("GetImage: Failed to mmap UV plane: %s", strerror(errno));
+-            return VA_STATUS_ERROR_OPERATION_FAILED;
++        V4L2MmapBuffer *cap_buf = &context->capture_buffers[surface->capture_idx];
++        y_plane = cap_buf->plane0_ptr;
++        y_len = cap_buf->plane0_len;
++        stride[0] = context->cap_stride[0];
++        stride[1] = context->cap_stride[1];
++        src_rows = context->cap_height;
++        if (context->cap_num_planes == 1) {
++            if (context->cap_uv_offset >= cap_buf->plane0_len) {
++                LOG("GetImage: UV offset %zu beyond buffer (%zu)",
++                    context->cap_uv_offset, cap_buf->plane0_len);
++                return VA_STATUS_ERROR_OPERATION_FAILED;
++            }
++            uv_plane = y_plane + context->cap_uv_offset;
++            uv_len = cap_buf->plane0_len - context->cap_uv_offset;
++        } else {
++            uv_plane = cap_buf->plane1_ptr;
++            uv_len = cap_buf->plane1_len;
+         }
+-
+-        /* Cache the mmap pointers */
+-        cap_buf->plane0_ptr = y_plane;
+-        cap_buf->plane1_ptr = uv_plane;
+-        cap_buf->plane0_len = planes[0].length;
+-        cap_buf->plane1_len = planes[1].length;
+-
+-        LOG("GetImage: Cached mmap for buffer %d (Y=%zu, UV=%zu)",
+-            surface->capture_idx, planes[0].length, planes[1].length);
+     }
+ 
+     /*
+-     * Use the actual V4L2 buffer plane sizes, not calculated surface sizes.
+-     * V4L2 may align height (e.g., 720 -> 704) so buffer may be smaller
+-     * than expected. Copying surface dimensions would read past buffer end.
++     * Copy row by row: the decoder's stride and row count may differ from
++     * the image (CreateImage lays out NV12 with pitch = width).
+      */
+-    size_t y_size = cap_buf->plane0_len;
+-    size_t uv_size = cap_buf->plane1_len;
+-
+-    /* Sanity check: ensure we don't overflow image buffer */
+-    size_t expected_size = surface->width * surface->height * 3 / 2;
+-    if (y_size + uv_size > expected_size) {
+-        /* Buffer larger than expected, clamp to surface dimensions */
+-        y_size = surface->width * surface->height;
+-        uv_size = y_size / 2;
++    uint32_t dst_w = image_buf->width, dst_h = image_buf->height;
++    uint32_t rows = dst_h < src_rows ? dst_h : src_rows;
++    uint32_t y_copy = dst_w < stride[0] ? dst_w : stride[0];
++    uint32_t uv_copy = dst_w < stride[1] ? dst_w : stride[1];
++    uint8_t *dst = image_buf->data;
++
++    if ((size_t)rows * stride[0] > y_len)
++        rows = y_len / stride[0];
++    for (uint32_t r = 0; r < rows; r++)
++        memcpy(dst + (size_t)r * dst_w, y_plane + (size_t)r * stride[0], y_copy);
++
++    uint32_t uv_rows = rows / 2;
++    if ((size_t)uv_rows * stride[1] > uv_len)
++        uv_rows = uv_len / stride[1];
++    for (uint32_t r = 0; r < uv_rows; r++)
++        memcpy(dst + (size_t)dst_w * dst_h + (size_t)r * dst_w,
++               uv_plane + (size_t)r * stride[1], uv_copy);
++
++    if (surface->own_ptr != NULL) {
++        struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ };
++        ioctl(surface->own_fd, DMA_BUF_IOCTL_SYNC, &sync);
+     }
+ 
+-    LOG("GetImage: Copying Y=%zu, UV=%zu bytes from capture buffer", y_size, uv_size);
+-
+-    /* Copy Y plane */
+-    memcpy(image_buf->data, y_plane, y_size);
+-    /* Copy UV plane */
+-    memcpy((uint8_t *)image_buf->data + y_size, uv_plane, uv_size);
++    LOG("GetImage: copied %u+%u rows (stride %u/%u) into %ux%u image",
++        rows, uv_rows, stride[0], stride[1], dst_w, dst_h);
+ 
+     return VA_STATUS_SUCCESS;
+ }
+@@ -1295,19 +1377,36 @@ static VAStatus v4l2_QuerySurfaceAttributes(
+     VASurfaceAttrib *attrib_list,
+     unsigned int *num_attribs)
+ {
++    /* Chromium requires both the minimum and maximum resolution */
++    static const struct {
++        VASurfaceAttribType type;
++        int value;
++    } sizes[] = {
++        { VASurfaceAttribMinWidth, 16 },
++        { VASurfaceAttribMinHeight, 16 },
++        { VASurfaceAttribMaxWidth, 4096 },
++        { VASurfaceAttribMaxHeight, 4096 },
++    };
++    const unsigned int count = 2 + sizeof(sizes) / sizeof(sizes[0]);
++
+     if (attrib_list == NULL) {
+-        *num_attribs = 4;
++        *num_attribs = count;
+         return VA_STATUS_SUCCESS;
+     }
++    if (*num_attribs < count) {
++        *num_attribs = count;
++        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
++    }
+ 
+-    int i = 0;
++    unsigned int i = 0;
+ 
+     /* Memory type */
+     attrib_list[i].type = VASurfaceAttribMemoryType;
+     attrib_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE;
+     attrib_list[i].value.type = VAGenericValueTypeInteger;
+     attrib_list[i].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+-                                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
++                                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME |
++                                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
+     i++;
+ 
+     /* Pixel format */
+@@ -1317,18 +1416,12 @@ static VAStatus v4l2_QuerySurfaceAttributes(
+     attrib_list[i].value.value.i = VA_FOURCC_NV12;
+     i++;
+ 
+-    /* Min/max dimensions */
+-    attrib_list[i].type = VASurfaceAttribMinWidth;
+-    attrib_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
+-    attrib_list[i].value.type = VAGenericValueTypeInteger;
+-    attrib_list[i].value.value.i = 16;
+-    i++;
+-
+-    attrib_list[i].type = VASurfaceAttribMaxWidth;
+-    attrib_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
+-    attrib_list[i].value.type = VAGenericValueTypeInteger;
+-    attrib_list[i].value.value.i = 4096;
+-    i++;
++    for (unsigned int j = 0; j < sizeof(sizes) / sizeof(sizes[0]); j++, i++) {
++        attrib_list[i].type = sizes[j].type;
++        attrib_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
++        attrib_list[i].value.type = VAGenericValueTypeInteger;
++        attrib_list[i].value.value.i = sizes[j].value;
++    }
+ 
+     *num_attribs = i;
+     return VA_STATUS_SUCCESS;
+@@ -1388,6 +1481,61 @@ static VAStatus v4l2_QueryProcessingRate(VADriverContextP ctx, VAConfigID config
+     VAProcessingRateParameter *proc_buf, unsigned int *processing_rate)
+ { return VA_STATUS_ERROR_UNIMPLEMENTED; }
+ 
++/*
++ * Give a surface its own linear NV12 buffer (allocated as R8, 1.5x high).
++ */
++static int surface_alloc_own(V4L2Driver *drv, V4L2Surface *surface)
++{
++    if (drv->gbm == NULL) {
++        if (drv->drm_fd < 0)
++            return -1;
++        drv->gbm = gbm_create_device(drv->drm_fd);
++        if (drv->gbm == NULL) {
++            LOG("gbm_create_device failed");
++            return -1;
++        }
++    }
++
++    /*
++     * Use the layout the decoder writes (Qualcomm iris NV12: 128-byte
++     * stride, rows aligned to 32 (Y) and 16 (UV), 4 KiB total alignment), so
++     * that it can decode straight into this buffer.
++     */
++    uint32_t stride = ALIGN_UP(surface->width, 128);
++    uint32_t y_rows = ALIGN_UP(surface->height, 32);
++    uint32_t uv_rows = ALIGN_UP((surface->height + 1) / 2, 16);
++    size_t size = ALIGN_UP((size_t)stride * (y_rows + uv_rows), 4096);
++    uint32_t rows = (size + stride - 1) / stride;
++
++    surface->own_bo = gbm_bo_create(drv->gbm, stride, rows,
++                                    GBM_FORMAT_R8, GBM_BO_USE_LINEAR);
++    if (surface->own_bo == NULL) {
++        LOG("gbm_bo_create %ux%u failed", stride, rows);
++        return -1;
++    }
++
++    surface->own_stride = gbm_bo_get_stride(surface->own_bo);
++    surface->own_uv_offset = (size_t)surface->own_stride * y_rows;
++    surface->own_size = (size_t)surface->own_stride * rows;
++    surface->own_fd = gbm_bo_get_fd(surface->own_bo);
++    if (surface->own_fd >= 0) {
++        void *ptr = mmap(NULL, surface->own_size, PROT_READ | PROT_WRITE,
++                         MAP_SHARED, surface->own_fd, 0);
++        if (ptr != MAP_FAILED) {
++            surface->own_ptr = ptr;
++            LOG("Surface-owned buffer %ux%u, stride %u", surface->width,
++                surface->height, surface->own_stride);
++            return 0;
++        }
++        LOG("mmap of surface-owned buffer failed: %s", strerror(errno));
++        close(surface->own_fd);
++        surface->own_fd = -1;
++    }
++    gbm_bo_destroy(surface->own_bo);
++    surface->own_bo = NULL;
++    return -1;
++}
++
+ static VAStatus v4l2_ExportSurfaceHandle(
+     VADriverContextP ctx,
+     VASurfaceID surface_id,
+@@ -1401,43 +1549,98 @@ static VAStatus v4l2_ExportSurfaceHandle(
+     if (surface == NULL)
+         return VA_STATUS_ERROR_INVALID_SURFACE;
+ 
+-    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME &&
+-        mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
++    /*
++     * Only the PRIME_2 descriptor (VADRMPRIMESurfaceDescriptor) is filled in;
++     * the legacy DRM_PRIME type uses a different structure.
++     */
++    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)
+         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
++
++    int fd;
++    size_t size, uv_offset;
++    uint32_t pitch[2];
++
++    if (surface->own_ptr == NULL && surface->context == NULL) {
++        /*
++         * Exported before any decode (Chromium builds its frame pool this
++         * way): the surface needs a buffer of its own, since the decoder
++         * picks CAPTURE buffers itself.
++         */
++        if (surface_alloc_own(drv, surface) < 0)
++            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+     }
+ 
+-    if (surface->context == NULL || surface->capture_idx < 0)
+-        return VA_STATUS_ERROR_INVALID_SURFACE;
++    if (surface->own_ptr != NULL) {
++        fd = fcntl(surface->own_fd, F_DUPFD_CLOEXEC, 0);
++        if (fd < 0)
++            return VA_STATUS_ERROR_OPERATION_FAILED;
++        size = surface->own_size;
++        uv_offset = surface->own_uv_offset;
++        pitch[0] = pitch[1] = surface->own_stride;
++    } else {
++        /*
++         * Firefox exports before calling vaSyncSurface, so the picture may not
++         * have been dequeued yet; the CAPTURE buffer is only known afterwards.
++         */
++        if (surface->capture_idx < 0)
++            v4l2_SyncSurface(ctx, surface_id);
++
++        if (surface->context == NULL || surface->capture_idx < 0) {
++            LOG("ExportSurfaceHandle: surface %d has no CAPTURE buffer", surface_id);
++            return VA_STATUS_ERROR_INVALID_SURFACE;
++        }
+ 
+-    /* Export DMABuf from V4L2 CAPTURE buffer */
+-    int fd = v4l2_export_dmabuf(surface->context, surface->capture_idx);
+-    if (fd < 0)
+-        return VA_STATUS_ERROR_OPERATION_FAILED;
++        V4L2Context *c = surface->context;
++        if (c->cap_num_planes != 1) {
++            /* Two-plane buffers would need two exported objects */
++            LOG("ExportSurfaceHandle: %u-plane CAPTURE buffers not supported", c->cap_num_planes);
++            return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
++        }
+ 
+-    if (mem_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+-        /* Simple DRM PRIME export - just return the fd */
+-        VADRMPRIMESurfaceDescriptor *desc = (VADRMPRIMESurfaceDescriptor *)descriptor;
+-        memset(desc, 0, sizeof(*desc));
+-        desc->fourcc = VA_FOURCC_NV12;
+-        desc->width = surface->width;
+-        desc->height = surface->height;
+-        desc->num_objects = 1;
+-        desc->objects[0].fd = fd;
+-        desc->objects[0].size = surface->width * surface->height * 3 / 2;
+-        desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
++        /* Export DMABuf from V4L2 CAPTURE buffer; the caller owns the fd */
++        fd = v4l2_export_dmabuf(c, surface->capture_idx);
++        if (fd < 0)
++            return VA_STATUS_ERROR_OPERATION_FAILED;
++        uv_offset = c->cap_uv_offset;
++        size = uv_offset + (size_t)c->cap_stride[1] * (c->cap_height / 2);
++        pitch[0] = c->cap_stride[0];
++        pitch[1] = c->cap_stride[1];
++    }
++
++    VADRMPRIMESurfaceDescriptor *desc = (VADRMPRIMESurfaceDescriptor *)descriptor;
++    memset(desc, 0, sizeof(*desc));
++    desc->fourcc = VA_FOURCC_NV12;
++    desc->width = surface->width;
++    desc->height = surface->height;
++    desc->num_objects = 1;
++    desc->objects[0].fd = fd;
++    desc->objects[0].size = size;
++    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
++
++    if (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) {
++        desc->num_layers = 1;
++        desc->layers[0].drm_format = DRM_FORMAT_NV12;
++        desc->layers[0].num_planes = 2;
++        desc->layers[0].object_index[0] = 0;
++        desc->layers[0].offset[0] = 0;
++        desc->layers[0].pitch[0] = pitch[0];
++        desc->layers[0].object_index[1] = 0;
++        desc->layers[0].offset[1] = uv_offset;
++        desc->layers[0].pitch[1] = pitch[1];
++    } else {
+         desc->num_layers = 2;
+         /* Y plane */
+         desc->layers[0].drm_format = DRM_FORMAT_R8;
+         desc->layers[0].num_planes = 1;
+         desc->layers[0].object_index[0] = 0;
+         desc->layers[0].offset[0] = 0;
+-        desc->layers[0].pitch[0] = surface->width;
+-        /* UV plane */
+-        desc->layers[1].drm_format = DRM_FORMAT_RG88;
++        desc->layers[0].pitch[0] = pitch[0];
++        /* UV plane: Cb in the low byte, so GR88 */
++        desc->layers[1].drm_format = DRM_FORMAT_GR88;
+         desc->layers[1].num_planes = 1;
+         desc->layers[1].object_index[0] = 0;
+-        desc->layers[1].offset[0] = surface->width * surface->height;
+-        desc->layers[1].pitch[0] = surface->width;
++        desc->layers[1].offset[0] = uv_offset;
++        desc->layers[1].pitch[0] = pitch[1];
+     }
+ 
+     return VA_STATUS_SUCCESS;
+diff --git a/src/vabackend.h b/src/vabackend.h
+index 093de8d..d85c041 100644
+--- a/src/vabackend.h
++++ b/src/vabackend.h
+@@ -32,14 +32,17 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <pthread.h>
++#include <stddef.h>
+ #include <linux/videodev2.h>
+ 
+ #define MAX_SURFACES 32
+ #define MAX_BUFFERS 1024
++#define TS_MAP_SIZE 64
+ #define MAX_FRAME_BUFFERS 1024
+ #define MAX_PROFILES 16
+ #define MAX_OUTPUT_BUFFERS 8
+-#define MAX_CAPTURE_BUFFERS 16
++#define MAX_CAPTURE_BUFFERS 32
++#define MMAP_CAPTURE_BUFFERS 16
+ #define BITSTREAM_BUFFER_SIZE (4 * 1024 * 1024)  /* 4MB */
+ 
+ /* Forward declarations */
+@@ -91,6 +94,17 @@ typedef struct V4L2Surface {
+     bool            decoded;        /* Has valid decoded content */
+     bool            no_output;      /* Frame decoded but no CAPTURE output (show_frame=0) */
+     VAImageID       cached_image;   /* Cached image buffer for this surface */
++    /*
++     * Surface-owned NV12 buffer, for callers that export a surface before
++     * decoding into it (Chromium). Decoded pictures are copied into it and
++     * the CAPTURE buffer is returned to the decoder straight away.
++     */
++    struct gbm_bo   *own_bo;
++    int             own_fd;
++    uint8_t         *own_ptr;
++    size_t          own_size;
++    uint32_t        own_stride;
++    size_t          own_uv_offset;
+     pthread_mutex_t mutex;
+     pthread_cond_t  cond;
+     struct V4L2Context *context;
+@@ -135,6 +149,32 @@ typedef struct V4L2Context {
+     V4L2MmapBuffer      capture_buffers[MAX_CAPTURE_BUFFERS];
+     int                 num_capture_buffers;
+ 
++    /*
++     * Each submitted frame carries a unique V4L2 timestamp; the decoder copies
++     * it to the CAPTURE buffer, which maps decoded pictures back to their
++     * surfaces (in any order, and with no picture for hidden VP9 frames).
++     */
++    uint64_t            ts_next;
++    uint64_t            cur_ts;
++    struct {
++        uint64_t            ts;
++        struct V4L2Surface  *surface;
++    }                   ts_map[TS_MAP_SIZE];
++
++    /* CAPTURE layout as reported by the decoder (VIDIOC_G_FMT) */
++    uint32_t            cap_num_planes;     /* 1: NV12 in one plane, 2: NM12 */
++    uint32_t            cap_stride[2];      /* bytes per line, Y and UV */
++    uint32_t            cap_height;         /* allocated (aligned) rows */
++    size_t              cap_uv_offset;      /* UV offset for one-plane NV12 */
++    size_t              cap_size;           /* plane 0 sizeimage */
++
++    /*
++     * DMABUF mode: the decoder writes straight into surface-owned buffers,
++     * one queued at a time (see v4l2_feed_capture).
++     */
++    bool                cap_dmabuf;
++    struct V4L2Surface  *cap_slot[MAX_CAPTURE_BUFFERS];
++
+     /* Current decode operation */
+     V4L2Surface         *render_target;
+     BitstreamBuffer     bitstream;
+@@ -151,6 +191,12 @@ typedef struct V4L2Context {
+         size_t          last_sps_size;
+         uint8_t         last_pps[64];
+         size_t          last_pps_size;
++        /* PPS as last sent to the decoder, and what it is built from */
++        uint8_t         sent_pps[64];
++        size_t          sent_pps_size;
++        VAPictureParameterBufferH264 pic;
++        unsigned int    l0_default;     /* num_ref_idx_l0_default_active_minus1 */
++        unsigned int    l1_default;     /* num_ref_idx_l1_default_active_minus1 */
+     } h264;
+ 
+     /* HEVC codec-specific state */
+@@ -184,6 +230,7 @@ typedef struct {
+ /* Main driver state */
+ typedef struct V4L2Driver {
+     int                 drm_fd;             /* DRM device fd from vaGetDisplayDRM */
++    struct gbm_device   *gbm;               /* for surface-owned buffers */
+     char                v4l2_device[64];    /* e.g., "/dev/video0" */
+ 
+     /* Object storage */
+@@ -222,9 +269,13 @@ int v4l2_probe_capabilities(V4L2Driver *drv, int fd);
+ int v4l2_setup_output_queue(V4L2Context *ctx);
+ int v4l2_setup_capture_queue(V4L2Context *ctx);
+ int v4l2_queue_bitstream(V4L2Context *ctx, void *data, size_t size);
+-int v4l2_dequeue_frame(V4L2Context *ctx, V4L2Surface *surface);
++int v4l2_dequeue_any(V4L2Context *ctx, int timeout_ms);
+ int v4l2_requeue_capture(V4L2Context *ctx, int capture_idx);
+ int v4l2_export_dmabuf(V4L2Context *ctx, int capture_idx);
++int v4l2_map_capture(V4L2Context *ctx, int capture_idx);
++void v4l2_copy_to_own(V4L2Context *ctx, int capture_idx, V4L2Surface *surface);
++void v4l2_feed_capture(V4L2Context *ctx);
++void v4l2_forget_surface(V4L2Context *ctx, V4L2Surface *surface);
+ 
+ /* Codec registration */
+ extern const V4L2Codec h264_codec;
+diff --git a/src/vp9.c b/src/vp9.c
+index 2f957bf..023fa71 100644
+--- a/src/vp9.c
++++ b/src/vp9.c
+@@ -33,6 +33,18 @@ static void vp9_handle_slice_data(V4L2Context *ctx, V4L2Buffer *buf)
+     }
+ }
+ 
++/*
++ * Hidden frames (show_frame = 0, e.g. alt-ref frames) are decoded as
++ * references only; a stateful decoder returns no picture for them.
++ */
++static void vp9_handle_picture_params(V4L2Context *ctx, V4L2Buffer *buf)
++{
++    VADecPictureParameterBufferVP9 *pp = buf->data;
++
++    if (ctx->render_target && !pp->pic_fields.bits.show_frame)
++        ctx->render_target->no_output = true;
++}
++
+ /*
+  * Prepare bitstream for submission
+  */
+@@ -54,6 +66,7 @@ const V4L2Codec vp9_codec = {
+     .v4l2_pixfmt = V4L2_PIX_FMT_VP9,
+     .profiles = vp9_profiles,
+     .num_profiles = sizeof(vp9_profiles) / sizeof(vp9_profiles[0]),
++    .handle_picture_params = vp9_handle_picture_params,
+     .handle_slice_data = vp9_handle_slice_data,
+     .prepare_bitstream = vp9_prepare_bitstream,
+ };
+-- 
+2.55.0
+

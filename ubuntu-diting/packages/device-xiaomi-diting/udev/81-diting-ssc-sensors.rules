@@ -1,0 +1,9 @@
+# Xiaomi Diting: the sensors (LSM6DSO accelerometer/gyroscope, QMC6308
+# magnetometer, TCS3408 light/proximity) are on the SLPI's sensor core.
+# iio-sensor-proxy (3.9, with libssc) enables only SSC light and compass by
+# default; add the accelerometer (screen rotation) and proximity (calls).
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-proximity"
+# The sensor core reports in Android's frame (reaction to gravity, +Z when
+# lying face up, orientation from the registry already applied);
+# iio-sensor-proxy expects the opposite signs.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, -1, 0; 0, 0, -1"

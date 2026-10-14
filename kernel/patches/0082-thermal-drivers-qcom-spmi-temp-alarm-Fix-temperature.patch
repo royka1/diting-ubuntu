@@ -1,0 +1,50 @@
+From fdf5f318dbe7b522f41d5990ebc6f69586a8968c Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 23:38:38 +0200
+Subject: [PATCH] thermal/drivers/qcom-spmi-temp-alarm: Fix temperature map
+ indexing
+
+chip->data->temp_map points to a whole THRESH_COUNT x STAGE_COUNT table.
+Indexing the pointer with the threshold steps over complete tables
+instead of rows, so any threshold above 0 copies the memory behind the
+table into temp_thresh_map. KASAN on the Xiaomi 12T Pro (SM8475):
+
+  BUG: KASAN: global-out-of-bounds in qpnp_tm_sync_thresholds
+  Read of size 24 ... belongs to the variable: temp_map_gen2_v1+0x60/0x80
+
+The same mistake is in qpnp_tm_update_critical_trip_temp(). Dereference
+the table pointer first, as qpnp_tm_update_critical_trip_temp() already
+does for the stage 2 limits.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/thermal/qcom/qcom-spmi-temp-alarm.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/thermal/qcom/qcom-spmi-temp-alarm.c b/drivers/thermal/qcom/qcom-spmi-temp-alarm.c
+index f39ca0ddd..faaa56b39 100644
+--- a/drivers/thermal/qcom/qcom-spmi-temp-alarm.c
++++ b/drivers/thermal/qcom/qcom-spmi-temp-alarm.c
+@@ -345,7 +345,7 @@ static int qpnp_tm_update_critical_trip_temp(struct qpnp_tm_chip *chip,
+ 	}
+ 
+ skip:
+-	memcpy(chip->temp_thresh_map, chip->data->temp_map[threshold],
++	memcpy(chip->temp_thresh_map, (*chip->data->temp_map)[threshold],
+ 		sizeof(chip->temp_thresh_map));
+ 	reg |= threshold;
+ 	if (disable_stage2_shutdown && !chip->require_stage2_shutdown)
+@@ -535,7 +535,7 @@ static int qpnp_tm_sync_thresholds(struct qpnp_tm_chip *chip)
+ 		return ret;
+ 
+ 	threshold = reg & SHUTDOWN_CTRL1_THRESHOLD_MASK;
+-	memcpy(chip->temp_thresh_map, chip->data->temp_map[threshold],
++	memcpy(chip->temp_thresh_map, (*chip->data->temp_map)[threshold],
+ 		sizeof(chip->temp_thresh_map));
+ 
+ 	return ret;
+-- 
+2.47.3
+

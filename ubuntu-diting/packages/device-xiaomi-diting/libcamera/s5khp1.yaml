@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: CC0-1.0
+# Xiaomi Diting main camera (Samsung S5KHP1 with AK7314 lens actuator):
+# libcamera software ISP tuning. Contrast autofocus: statistics come every
+# fourth frame, enough for the lens to settle, so no extra settle periods;
+# coarse scan in steps of 10, fine scan in steps of 2 (of 0..100).
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+  - Awb:
+  - Adjust:
+  - Agc:
+  - Af:
+      settleFrames: 0
+      coarseStep: 10
+      fineStep: 2
+...

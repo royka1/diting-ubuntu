@@ -1,0 +1,22 @@
+Source: diting-firmware-setup
+Section: admin
+Priority: optional
+Maintainer: royka1 <397414+royka1@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/royka1/diting-ubuntu
+Rules-Requires-Root: no
+
+Package: diting-firmware-setup
+Architecture: arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}, device-xiaomi-diting (>= 0.7.9),
+ python3, m4, alsa-utils, erofs-utils, dmsetup, util-linux, apt,
+ linux-firmware-qualcomm-graphics, linux-firmware-qualcomm-wireless
+Description: extract the Xiaomi 12T Pro (diting) firmware from its own partitions
+ The DSP, modem, GPU zap shader, video, Bluetooth and speaker amplifier
+ firmware of the Xiaomi 12T Pro is signed for the device and cannot be
+ redistributed. At first boot this reads it read-only from the phone's own
+ Android partitions (modem, bluetooth, dsp, persist and vendor inside
+ super), builds the firmware-xiaomi-diting package locally (including the
+ voice call topology from the phone's ACDB and the camera register tables)
+ and installs it.

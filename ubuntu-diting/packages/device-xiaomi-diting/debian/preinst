@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+# diting-callaudio provides org.mobian_project.CallAudio instead of callaudiod
+if [ "$1" = install ] || [ "$1" = upgrade ]; then
+	dpkg-divert --package device-xiaomi-diting --rename \
+		--divert /usr/share/dbus-1/services/org.mobian_project.CallAudio.service.callaudiod \
+		--add /usr/share/dbus-1/services/org.mobian_project.CallAudio.service >/dev/null
+fi
+#DEBHELPER#

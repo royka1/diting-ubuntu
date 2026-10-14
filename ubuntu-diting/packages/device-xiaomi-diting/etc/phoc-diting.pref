@@ -1,0 +1,5 @@
+# Keep the locally rebuilt phoc (refresh-rate switching fix, see
+# packages/phoc/README.md) even when Ubuntu publishes a newer phoc.
+Package: phoc
+Pin: version *diting*
+Pin-Priority: 1001

@@ -1,0 +1,94 @@
+From e6b6c6fb73cf743e8892c46d0ce738de879cf4cd Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 15:03:59 +0200
+Subject: [PATCH 4/8] hexagonrpcd: listener: Answer unsupported requests with
+ an error
+
+The sensor DSP of SM8475 (waipio) invokes handle 0xffffffff after it
+fails to open the sns_registry interface. Reply with the error instead
+of stopping the listener, as Android's listener does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hexagonrpcd/listener.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/hexagonrpcd/listener.c b/hexagonrpcd/listener.c
+index 3414974..4bb6b89 100644
+--- a/hexagonrpcd/listener.c
++++ b/hexagonrpcd/listener.c
+@@ -501,6 +501,8 @@ static int invoke_requested_procedure(size_t n_ifaces,
+ 	uint32_t method = REMOTE_SCALARS_METHOD(sc);
+ 	int ret;
+ 
++	*returned = NULL;
++
+ 	if (method < 31) {
+ 		method = REMOTE_SCALARS_METHOD(sc);
+ 	} else if (REMOTE_SCALARS_INBUFS(sc) != 0
+@@ -509,26 +511,26 @@ static int invoke_requested_procedure(size_t n_ifaces,
+ 	} else {
+ 		fprintf(stderr, "Expected extended method ID, but got none\n");
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (sc & 0xff) {
+ 		fprintf(stderr, "Handles are not supported, but got %u in, %u out\n",
+ 				(sc & 0xf0) >> 4, sc & 0xf);
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (handle >= n_ifaces) {
+ 		fprintf(stderr, "Unsupported handle: %u\n", handle);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	if (method >= ifaces[handle]->n_procs) {
+ 		fprintf(stderr, "Unsupported method: %u (%08x)\n", method, sc);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	impl = &ifaces[handle]->procs[method];
+@@ -536,7 +538,7 @@ static int invoke_requested_procedure(size_t n_ifaces,
+ 	if (impl->def == NULL || impl->impl == NULL) {
+ 		fprintf(stderr, "Unsupported method: %u (%08x)\n", method, sc);
+ 		*result = AEE_EUNSUPPORTED;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	ret = count_sizes4(impl->def, REMOTE_SCALARS_INBUFS(sc),
+@@ -544,7 +546,7 @@ static int invoke_requested_procedure(size_t n_ifaces,
+ 	if (ret) {
+ 		fprintf(stderr, "Method invoked with less arguments than expected\n");
+ 		*result = AEE_EBADPARM;
+-		return 1;
++		return 0;
+ 	}
+ 
+ 	*returned = alloc_outbufs4(impl->def, decoded,
+@@ -598,6 +600,13 @@ int run_fastrpc_listener(int fd,
+ 		if (decoded != NULL)
+ 			iobuf_free(REMOTE_SCALARS_INBUFS(sc), decoded);
+ 
++		/*
++		 * Requests that could not be served are answered with the
++		 * error only, the remote side ignores the outputs then.
++		 */
++		if (returned == NULL)
++			sc = REMOTE_SCALARS_MAKE(0, 0, 0);
++
+ 		n_outbufs = REMOTE_SCALARS_OUTBUFS(sc);
+ 	}
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,17 @@
+libva-v4l2-stateful (0.1.0+git6447ebb-0diting2) resolute; urgency=medium
+
+  * Set up snap Chromium at every login, also before its first start.
+  * Firefox: enable VA-API through a default pref
+    (media.hardware-video-decoding.force-enabled).
+  * patches/0002: name the Qualcomm iris decoder in the vendor string.
+
+ -- royka1 <397414+royka1@users.noreply.github.com>  Wed, 14 Oct 2026 12:30:00 +0200
+
+libva-v4l2-stateful (0.1.0+git6447ebb-0diting1) resolute; urgency=medium
+
+  * Local build for the Xiaomi 12T Pro (diting) from upstream 6447ebb
+    with patches/0001: Qualcomm iris support, Firefox and Chromium
+    zero-copy.
+  * Install as msm_drv_video.so as well; snap Chromium helper.
+
+ -- ubuntu-diting local build <ubuntu-diting@localhost>  Wed, 14 Oct 2026 10:00:00 +0200

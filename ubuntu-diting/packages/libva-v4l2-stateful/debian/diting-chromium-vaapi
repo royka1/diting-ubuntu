@@ -1,0 +1,28 @@
+#!/bin/sh
+# Snap Chromium cannot read host libraries, so give it its own copy of the
+# VA-API driver in the snap's per-user common directory, and point it there
+# through ~/.chromium-browser.init (sourced by the snap launcher). An
+# existing init file is left alone. Runs even before Chromium was first
+# started (or installed), so that the first start already decodes in hardware.
+set -eu
+
+drv=/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so
+dir="$HOME/snap/chromium/common/dri"
+init="$HOME/.chromium-browser.init"
+
+mkdir -p "$dir"
+if ! cmp -s "$drv" "$dir/v4l2_drv_video.so"; then
+	cp "$drv" "$dir/v4l2_drv_video.so.new"
+	mv "$dir/v4l2_drv_video.so.new" "$dir/v4l2_drv_video.so"
+fi
+
+if [ ! -e "$init" ]; then
+	cat > "$init" <<'INIT'
+# Hardware video decoding (iris) through the libva-v4l2-stateful VA-API driver
+# (written by diting-chromium-vaapi). The snap cannot see /usr/lib/.../dri,
+# so the driver is copied into the snap common directory at login.
+export LIBVA_DRIVER_NAME=v4l2
+export LIBVA_DRIVERS_PATH="$SNAP_USER_COMMON/dri"
+CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ozone-platform=wayland --enable-features=VaapiVideoDecoder,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL"
+INIT
+fi

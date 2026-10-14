@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 19:45:11 +0200
+Subject: [PATCH 01/46] dt-bindings: arm: qcom: phy: Add SM8475 and Xiaomi
+ Diting compatibles
+
+Add the qcom,sm8475 SoC compatible with the Xiaomi 12T Pro / Redmi K50
+Ultra (xiaomi,diting) board, and a qcom,sm8475-snps-eusb2-phy compatible
+which falls back to qcom,sm8550-snps-eusb2-phy. SM8475 replaced the
+SM8450 femto USB2 PHY with the Synopsys eUSB2 PHY at the same address
+(confirmed from the Diting vendor DT: compatible qcom,usb-snps-eusb2-phy,
+reg 0x88e3000).
+
+Local Diting bring-up patch, not submitted upstream.
+---
+ Documentation/devicetree/bindings/arm/qcom.yaml              | 5 +++++
+ .../devicetree/bindings/phy/qcom,snps-eusb2-phy.yaml         | 1 +
+ 2 files changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/arm/qcom.yaml b/Documentation/devicetree/bindings/arm/qcom.yaml
+index 50cc18a6e..cf05eb980 100644
+--- a/Documentation/devicetree/bindings/arm/qcom.yaml
++++ b/Documentation/devicetree/bindings/arm/qcom.yaml
+@@ -1096,6 +1096,11 @@ properties:
+               - sony,pdx224
+           - const: qcom,sm8450
+ 
++      - items:
++          - enum:
++              - xiaomi,diting
++          - const: qcom,sm8475
++
+       - items:
+           - enum:
+               - qcom,sm8550-hdk
+diff --git a/Documentation/devicetree/bindings/phy/qcom,snps-eusb2-phy.yaml b/Documentation/devicetree/bindings/phy/qcom,snps-eusb2-phy.yaml
+index 096f6b546..2f8bb38a5 100644
+--- a/Documentation/devicetree/bindings/phy/qcom,snps-eusb2-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/qcom,snps-eusb2-phy.yaml
+@@ -21,6 +21,7 @@ properties:
+               - qcom,milos-snps-eusb2-phy
+               - qcom,sar2130p-snps-eusb2-phy
+               - qcom,sdx75-snps-eusb2-phy
++              - qcom,sm8475-snps-eusb2-phy
+               - qcom,sm8650-snps-eusb2-phy
+               - qcom,x1e80100-snps-eusb2-phy
+           - const: qcom,sm8550-snps-eusb2-phy

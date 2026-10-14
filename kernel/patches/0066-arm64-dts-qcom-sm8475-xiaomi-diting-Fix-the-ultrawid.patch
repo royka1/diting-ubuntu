@@ -1,0 +1,36 @@
+From 8b281113d8c8ec3a99316d04c15769cb1fffe2f1 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 17:40:02 +0200
+Subject: [PATCH] arm64: dts: qcom: sm8475-xiaomi-diting: Fix the ultrawide
+ rotation
+
+With the module's readout orientation (mirror and flip) the image needs
+a 270 degree rotation to be upright: with 90 (taken from the vendor
+sensor-position roll) GNOME Snapshot shows it upside down.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 3ca17e5e2..8ac9e4d3a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -684,7 +684,12 @@ camera@2d {
+ 		firmware-name = "qcom/sm8475/xiaomi/diting/s5k4h7-ultra.camregs";
+ 
+ 		orientation = <1>;
+-		rotation = <90>;
++		/*
++		 * Upright with the readout orientation the module data uses
++		 * (mirror + flip); 90 (from the vendor sensor-position roll)
++		 * shows the image upside down in GNOME Snapshot.
++		 */
++		rotation = <270>;
+ 
+ 		port {
+ 			cam_ultra_ep: endpoint {
+-- 
+2.47.3
+

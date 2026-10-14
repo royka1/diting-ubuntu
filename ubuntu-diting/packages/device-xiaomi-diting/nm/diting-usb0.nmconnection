@@ -1,0 +1,17 @@
+# Xiaomi Diting: static address on the USB NCM gadget; the host at
+# 172.16.42.2 can share its internet connection (NAT).
+[connection]
+id=diting-usb0
+uuid=6f0c3b52-3d4e-4c55-9a51-0d1f2e7a9b10
+type=ethernet
+interface-name=usb0
+autoconnect=true
+autoconnect-priority=10
+
+[ipv4]
+method=manual
+address1=172.16.42.1/24,172.16.42.2
+dns=1.1.1.1;9.9.9.9;
+
+[ipv6]
+method=link-local

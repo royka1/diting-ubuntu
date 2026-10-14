@@ -1,0 +1,150 @@
+From d5b91e88150e1a4730b50cda1b1d2edbb32faa3e Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 16:20:38 +0200
+Subject: [PATCH 61/61] arm64: dts: qcom: sm8475-xiaomi-diting: Add the rear
+ ultrawide camera
+
+Samsung S5K4H7 on CCI0 master 0 at 0x2d (vendor qcom,cam-sensor2: slave
+0x5a, MCLK1 on TLMM 101, reset TLMM 24, CSIPHY 1) with its 2.8 V AVDD
+switched by TLMM 6 from BOB (vendor CAMERA_ULTRA_AVDD). The module data
+asks for a 24 MHz MCLK (vendor DT default 19.2 MHz), four lanes in order
+(laneAssign 0x3210) at 330 MHz. Mounted rear facing, rotated 90 degrees
+(vendor sensor-position yaw 180, roll 90).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/sm8475-xiaomi-diting.dts    | 92 ++++++++++++++++++-
+ 1 file changed, 91 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 724ed5c6b..0592974d3 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -13,7 +13,9 @@
+ #include <dt-bindings/firmware/qcom,scm.h>
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/clock/qcom,sm8450-camcc.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/media/video-interfaces.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ 
+@@ -187,6 +189,21 @@ top_out_mux: audio-mux-top {
+ 		pinctrl-names = "default";
+ 	};
+ 
++	/* Ultrawide camera 2.8 V AVDD, switched by TLMM 6 (vendor CAMERA_ULTRA_AVDD) */
++	cam_ultra_avdd: regulator-cam-ultra-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_ultra_avdd";
++		regulator-min-microvolt = <2800000>;
++		regulator-max-microvolt = <2800000>;
++		gpio = <&tlmm 6 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		startup-delay-us = <100>;
++		vin-supply = <&vreg_bob>;
++
++		pinctrl-0 = <&cam_ultra_avdd_en>;
++		pinctrl-names = "default";
++	};
++
+ 	/* Panel 1.2 V core supply, switched by TLMM 66 (vendor display_panel_vddd) */
+ 	panel_vddd: regulator-panel-vddd {
+ 		compatible = "regulator-fixed";
+@@ -573,11 +590,63 @@ &camss {
+ 	/*
+ 	 * CSIPHY rails as the vendor DT csiphy nodes: csi-vdd-0p9 is
+ 	 * pm8350 L5 (0.88 V, 147 mA), csi-vdd-1p2 is pm8350c L10 (1.2 V,
+-	 * 59.4 mA). No sensors yet.
++	 * 59.4 mA).
+ 	 */
+ 	vdda-phy-supply = <&vreg_l5b_0p88>;
+ 	vdda-pll-supply = <&vreg_l10c_1p2>;
+ 	status = "okay";
++
++	ports {
++		/* Rear ultrawide S5K4H7, vendor csiphy-sd-index 1 */
++		port@1 {
++			csiphy1_ep: endpoint {
++				clock-lanes = <7>;
++				data-lanes = <0 1 2 3>;
++				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
++				remote-endpoint = <&cam_ultra_ep>;
++			};
++		};
++	};
++};
++
++&cci0 {
++	status = "okay";
++};
++
++&cci0_i2c0 {
++	/*
++	 * Rear ultrawide: Sunny module with a Samsung S5K4H7 (vendor
++	 * qcom,cam-sensor2: CCI0 master 0, slave 0x5a, MCLK1, reset TLMM 24,
++	 * AVDD only; the module data asks for a 24 MHz MCLK). Register tables
++	 * from the module data, see firmware-xiaomi-diting.
++	 */
++	camera@2d {
++		compatible = "samsung,s5k4h7";
++		reg = <0x2d>;
++
++		clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clock-rates = <24000000>;
++
++		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
++		pinctrl-0 = <&cam_mclk1_default>, <&cam_ultra_reset>;
++		pinctrl-names = "default";
++
++		vdda-supply = <&cam_ultra_avdd>;
++
++		firmware-name = "qcom/sm8475/xiaomi/diting/s5k4h7-ultra.camregs";
++
++		orientation = <1>;
++		rotation = <90>;
++
++		port {
++			cam_ultra_ep: endpoint {
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <330000000>;
++				remote-endpoint = <&csiphy1_ep>;
++			};
++		};
++	};
+ };
+ 
+ &remoteproc_slpi {
+@@ -926,6 +995,27 @@ &tlmm {
+ 	/* Secure-world owned, per qcom,gpios-reserved in the vendor DT */
+ 	gpio-reserved-ranges = <28 4>, <36 4>;
+ 
++	cam_mclk1_default: cam-mclk1-default-state {
++		pins = "gpio101";
++		function = "cam_mclk";
++		drive-strength = <6>;
++		bias-disable;
++	};
++
++	cam_ultra_avdd_en: cam-ultra-avdd-en-state {
++		pins = "gpio6";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_ultra_reset: cam-ultra-reset-state {
++		pins = "gpio24";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	spk_amp_b_reset: spk-amp-b-reset-state {
+ 		pins = "gpio3";
+ 		function = "gpio";
+-- 
+2.47.3
+

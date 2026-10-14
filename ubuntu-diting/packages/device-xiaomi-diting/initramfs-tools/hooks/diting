@@ -1,0 +1,15 @@
+#!/bin/sh
+# initramfs-tools hook for Xiaomi Diting debug support.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/lib/diting/diting-usb-gadget /usr/lib/diting/diting-usb-gadget
+copy_exec /usr/sbin/ip /usr/sbin/ip
+copy_exec /usr/bin/setsid /usr/bin/setsid
+copy_exec /usr/sbin/diting-reboot-bootloader /usr/sbin/diting-reboot-bootloader
+# dd for diting-reboot-bootloader (busybox-initramfs has none)
+if [ -x /usr/lib/klibc/bin/dd ]; then
+	copy_exec /usr/lib/klibc/bin/dd /usr/bin/dd
+fi

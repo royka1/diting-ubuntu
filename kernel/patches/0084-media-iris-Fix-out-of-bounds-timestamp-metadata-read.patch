@@ -1,0 +1,48 @@
+From 9523325aeab07412b7c0e5960ddbb331f83f135e Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 09:22:53 +0200
+Subject: [PATCH] media: iris: Fix out-of-bounds timestamp metadata read
+
+When no queued input buffer matches the timestamp of a decoded buffer,
+iris_get_ts_metadata() falls back to inst->tss[inst->metadata_idx].
+metadata_idx is the next slot to be written and is only wrapped before
+the next write, so after 64 input buffers it equals ARRAY_SIZE(tss) and
+the fallback reads past the end of the array. The bytes found there are
+ORed into the capture buffer flags, which can set V4L2_BUF_FLAG_LAST:
+userspace then sees a spurious EOS event and every following DQBUF
+fails with -EPIPE.
+
+Even within bounds the entry belongs to an unrelated frame, so do not
+copy any metadata when there is no match.
+
+Seen on SM8475 with VP9 streams containing hidden frames, whose empty
+capture buffers carry no input timestamp.
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/iris/iris_buffer.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index 246ad0abb..04bb91299 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -928,9 +928,13 @@ static void iris_get_ts_metadata(struct iris_inst *inst, u64 timestamp_ns,
+ 		return;
+ 	}
+ 
++	/*
++	 * No input buffer carried this timestamp (for example an empty buffer
++	 * returned for a frame that is not shown). metadata_idx is the next
++	 * slot to write and can be one past the end of tss[], so there is no
++	 * metadata to copy.
++	 */
+ 	vbuf->flags &= ~mask;
+-	vbuf->flags |= inst->tss[inst->metadata_idx].flags;
+-	vbuf->timecode = inst->tss[inst->metadata_idx].tc;
+ }
+ 
+ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
+-- 
+2.55.0
+

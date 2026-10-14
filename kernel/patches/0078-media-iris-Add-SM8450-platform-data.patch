@@ -1,0 +1,117 @@
+From b46681dc846e8a43dd5e95a1821ef33e8e9d105a Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 20:28:46 +0200
+Subject: [PATCH 78/79] media: iris: Add SM8450 platform data
+
+SM8450 and SM8475 use the IRIS2 (VPU 2.0) core of SM8250 but run a
+firmware with the Gen2 HFI (the vendor msm_vidc driver for waipio is the
+Gen2 driver with iris2 hardware ops). Combine the VPU2 hardware ops and
+tables with the Gen2 firmware data. Power rails are MXC and MMCX, and
+only the AXI (bus) reset is used, as on SM8550. The DMA ranges match the
+vendor context banks (non-secure from 0x25800000, secure non-pixel
+0x01000000 + 0x24800000), which equals tz_cp_config_vpu2.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../platform/qcom/iris/iris_platform_common.h |  1 +
+ .../platform/qcom/iris/iris_platform_vpu2.c   | 43 +++++++++++++++++++
+ drivers/media/platform/qcom/iris/iris_probe.c |  4 ++
+ 3 files changed, 48 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index ff48333ad..0e070a0e1 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -56,6 +56,7 @@ extern const struct iris_firmware_data iris_hfi_gen2_data;
+ extern const struct iris_platform_data qcs8300_data;
+ extern const struct iris_platform_data sc7280_data;
+ extern const struct iris_platform_data sm8250_data;
++extern const struct iris_platform_data sm8450_data;
+ extern const struct iris_platform_data sm8550_data;
+ extern const struct iris_platform_data sm8650_data;
+ extern const struct iris_platform_data sm8750_data;
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+index 6e06a3282..8137365b8 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+@@ -28,6 +28,12 @@ static const struct iris_firmware_desc iris_vpu20_p4_gen1_desc = {
+ 	.fwname = "qcom/vpu/vpu20_p4.mbn",
+ };
+ 
++static const struct iris_firmware_desc iris_vpu20_p4_gen2_desc = {
++	.firmware_data = &iris_hfi_gen2_data,
++	.get_vpu_buffer_size = iris_vpu_buf_size,
++	.fwname = "qcom/vpu/vpu20_p4_gen2.mbn",
++};
++
+ static const u32 iris_fmts_vpu2_dec[] = {
+ 	[IRIS_FMT_H264] = V4L2_PIX_FMT_H264,
+ 	[IRIS_FMT_HEVC] = V4L2_PIX_FMT_HEVC,
+@@ -53,6 +59,10 @@ static const struct icc_info iris_icc_info_vpu2[] = {
+ 
+ static const char * const iris_clk_reset_table_vpu2[] = { "bus", "core" };
+ 
++static const char * const sm8450_clk_reset_table[] = { "bus" };
++
++static const char * const sm8450_opp_pd_table[] = { "mxc", "mmcx" };
++
+ static const char * const iris_pmdomain_table_vpu2[] = { "venus", "vcodec0" };
+ 
+ static const struct tz_cp_config tz_cp_config_vpu2[] = {
+@@ -121,3 +131,36 @@ const struct iris_platform_data sm8250_data = {
+ 	.max_core_mbpf = NUM_MBS_8K,
+ 	.max_core_mbps = ((7680 * 4320) / 256) * 60,
+ };
++
++/*
++ * SM8450 and SM8475 have the IRIS2 (VPU 2.0) core of SM8250, but their
++ * firmware speaks the Gen2 HFI.
++ */
++const struct iris_platform_data sm8450_data = {
++	.firmware_desc = &iris_vpu20_p4_gen2_desc,
++	.vpu_ops = &iris_vpu2_ops,
++	.icc_tbl = iris_icc_info_vpu2,
++	.icc_tbl_size = ARRAY_SIZE(iris_icc_info_vpu2),
++	.clk_rst_tbl = sm8450_clk_reset_table,
++	.clk_rst_tbl_size = ARRAY_SIZE(sm8450_clk_reset_table),
++	.bw_tbl_dec = sm8250_bw_table_dec,
++	.bw_tbl_dec_size = ARRAY_SIZE(sm8250_bw_table_dec),
++	.pmdomain_tbl = iris_pmdomain_table_vpu2,
++	.pmdomain_tbl_size = ARRAY_SIZE(iris_pmdomain_table_vpu2),
++	.opp_pd_tbl = sm8450_opp_pd_table,
++	.opp_pd_tbl_size = ARRAY_SIZE(sm8450_opp_pd_table),
++	.clk_tbl = sm8250_clk_table,
++	.clk_tbl_size = ARRAY_SIZE(sm8250_clk_table),
++	.opp_clk_tbl = sm8250_opp_clk_table,
++	/* Upper bound of DMA address range */
++	.dma_mask = 0xe0000000 - 1,
++	.inst_iris_fmts = iris_fmts_vpu2_dec,
++	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu2_dec),
++	.inst_caps = &platform_inst_cap_vpu2,
++	.tz_cp_config_data = tz_cp_config_vpu2,
++	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu2),
++	.num_vpp_pipe = 4,
++	.max_session_count = 16,
++	.max_core_mbpf = NUM_MBS_8K,
++	.max_core_mbps = ((7680 * 4320) / 256) * 60,
++};
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index c2dcb50a2..aa7430229 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -372,6 +372,10 @@ static const struct of_device_id iris_dt_match[] = {
+ 		.compatible = "qcom,sm8250-venus",
+ 		.data = &sm8250_data,
+ 	},
++	{
++		.compatible = "qcom,sm8450-iris",
++		.data = &sm8450_data,
++	},
+ 	{
+ 		.compatible = "qcom,sm8550-iris",
+ 		.data = &sm8550_data,
+-- 
+2.47.3
+

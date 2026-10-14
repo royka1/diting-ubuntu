@@ -1,0 +1,135 @@
+#!/usr/bin/python3 -I
+"""Mark the running A/B slot as successfully booted for the Qualcomm ABL.
+
+ABL decrements the retry count of the active slot on every boot (in the
+GPT attribute bits of the boot_<slot> partition entry) and marks the slot
+unbootable when it reaches zero, unless the "successful" bit is set. Android
+sets that bit through its boot control HAL; this does the same for Linux.
+
+Only bit 54 (successful) of the active boot_<slot> entry changes, in the
+primary and the backup GPT, with the CRCs recomputed. Nothing is written if
+the tables do not look exactly as expected.
+
+  diting-mark-boot-successful [--dry-run]
+  diting-mark-boot-successful --print-slot   (prints "a" or "b", read-only)
+"""
+import os
+import struct
+import sys
+import zlib
+
+PRIO, ACTIVE, RETRY, SUCCESSFUL, UNBOOTABLE = 48, 50, 51, 54, 55
+SLOTS = ("a", "b")
+
+
+def die(msg):
+    print(f"diting-mark-boot-successful: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def disk_of(partlabel):
+    part = os.path.realpath(f"/dev/disk/by-partlabel/{partlabel}")
+    sysdir = os.path.realpath(f"/sys/class/block/{os.path.basename(part)}")
+    disk = os.path.basename(os.path.dirname(sysdir))
+    with open(f"/sys/block/{disk}/queue/logical_block_size") as f:
+        return f"/dev/{disk}", int(f.read())
+
+
+class Gpt:
+    def __init__(self, fd, ss, lba):
+        self.fd, self.ss, self.lba = fd, ss, lba
+        self.hdr = bytearray(os.pread(fd, 92, lba * ss))
+        if self.hdr[:8] != b"EFI PART":
+            die(f"no GPT header at LBA {lba}")
+        hsize = struct.unpack_from("<I", self.hdr, 12)[0]
+        if hsize != 92:
+            die(f"unexpected GPT header size {hsize}")
+        self.my, self.alt = struct.unpack_from("<QQ", self.hdr, 24)
+        self.elba, self.n, self.esz, ecrc = struct.unpack_from("<QIII", self.hdr, 72)
+        if self.my != lba or self.esz != 128:
+            die(f"unexpected GPT header at LBA {lba}")
+        if self._hcrc() != struct.unpack_from("<I", self.hdr, 16)[0]:
+            die(f"bad header CRC at LBA {lba}")
+        self.ents = bytearray(os.pread(fd, self.n * self.esz, self.elba * ss))
+        if zlib.crc32(self.ents) != ecrc:
+            die(f"bad partition entry CRC (header at LBA {lba})")
+
+    def _hcrc(self):
+        h = bytearray(self.hdr)
+        h[16:20] = b"\0" * 4
+        return zlib.crc32(h)
+
+    def find(self, name):
+        for i in range(self.n):
+            e = self.ents[i * 128:(i + 1) * 128]
+            if e[56:128].decode("utf-16le").rstrip("\0") == name:
+                return i
+        return None
+
+    def attr(self, i):
+        return struct.unpack_from("<Q", self.ents, i * 128 + 48)[0]
+
+    def set_attr(self, i, value):
+        struct.pack_into("<Q", self.ents, i * 128 + 48, value)
+
+    def write(self):
+        struct.pack_into("<I", self.hdr, 88, zlib.crc32(self.ents))
+        struct.pack_into("<I", self.hdr, 16, self._hcrc())
+        os.pwrite(self.fd, bytes(self.ents), self.elba * self.ss)
+        os.pwrite(self.fd, bytes(self.hdr), self.lba * self.ss)
+        os.fsync(self.fd)
+
+
+def describe(a):
+    return (f"0x{a:016x} prio={(a >> PRIO) & 3} active={(a >> ACTIVE) & 1} "
+            f"retry={(a >> RETRY) & 7} successful={(a >> SUCCESSFUL) & 1} "
+            f"unbootable={(a >> UNBOOTABLE) & 1}")
+
+
+def main():
+    print_slot = "--print-slot" in sys.argv[1:]
+    dry = print_slot or "--dry-run" in sys.argv[1:]
+    dev, ss = disk_of("boot_a")
+    if disk_of("boot_b")[0] != dev:
+        die("boot_a and boot_b are on different disks")
+
+    fd = os.open(dev, os.O_RDONLY if dry else os.O_RDWR)
+    primary = Gpt(fd, ss, 1)
+    backup = Gpt(fd, ss, primary.alt)
+    if (backup.n, backup.esz, backup.alt) != (primary.n, primary.esz, 1):
+        die("primary and backup GPT headers do not match")
+
+    active = [s for s in SLOTS
+              if (primary.attr(primary.find(f"boot_{s}")) >> ACTIVE) & 1]
+    if len(active) != 1:
+        die(f"expected exactly one active slot, found {active}")
+    if print_slot:
+        print(active[0])
+        return
+    name = f"boot_{active[0]}"
+    i, j = primary.find(name), backup.find(name)
+    if i is None or i != j:
+        die(f"{name} not found at the same index in both GPTs")
+
+    a = primary.attr(i)
+    print(f"{dev}: {name} #{i + 1} {describe(a)}")
+    if (a >> UNBOOTABLE) & 1:
+        die(f"{name} is marked unbootable; refusing to mark it successful")
+    if (a >> SUCCESSFUL) & 1 and (backup.attr(j) >> SUCCESSFUL) & 1:
+        print("already marked successful")
+        return
+    if dry:
+        print("dry run: would set the successful bit")
+        return
+
+    for gpt in (backup, primary):   # primary last: it is what ABL reads
+        gpt.set_attr(i, gpt.attr(i) | (1 << SUCCESSFUL))
+        gpt.write()
+    os.close(fd)
+
+    check = Gpt(os.open(dev, os.O_RDONLY), ss, 1)
+    print(f"marked successful: {describe(check.attr(i))}")
+
+
+if __name__ == "__main__":
+    main()

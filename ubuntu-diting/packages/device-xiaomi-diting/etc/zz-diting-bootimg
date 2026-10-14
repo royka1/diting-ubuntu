@@ -1,0 +1,9 @@
+#!/bin/sh
+# Kernel postinst/initramfs post-update hook: regenerate the Diting Android
+# boot images in /boot/diting/ for the given kernel. Never flashes anything.
+set -e
+version="${1:-}"
+[ -n "$version" ] || exit 0
+case "$version" in *-diting) ;; *) exit 0 ;; esac
+[ -e "/boot/initrd.img-$version" ] || exit 0
+exec /usr/sbin/diting-mkbootimg --release "$version"

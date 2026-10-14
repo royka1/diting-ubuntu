@@ -1,0 +1,2 @@
+debian/diting-chromium-vaapi usr/bin
+debian/firefox-vaapi.js usr/lib/firefox/defaults/pref

@@ -1,0 +1,135 @@
+From ed5493e924778ea2aed571bff843c6f859ba0b6f Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 15:10:23 +0200
+Subject: [PATCH 5/8] hexagonrpcd: listener: Fetch input buffers larger than
+ 256 bytes
+
+Only the first 256 bytes of the input come with adsp_listener_next2.
+Fetch the rest with adsp_listener_get_in_bufs2 (method 5), as Android's
+listener does. The sensor registry writes files in 512 byte chunks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hexagonrpcd/interface/adsp_listener.c | 15 +++++++++++++
+ hexagonrpcd/interface/adsp_listener.h | 12 +++++++++++
+ hexagonrpcd/listener.c                | 31 +++++++++++++++++++++++----
+ 3 files changed, 54 insertions(+), 4 deletions(-)
+
+diff --git a/hexagonrpcd/interface/adsp_listener.c b/hexagonrpcd/interface/adsp_listener.c
+index d2197df..aeaef3a 100644
+--- a/hexagonrpcd/interface/adsp_listener.c
++++ b/hexagonrpcd/interface/adsp_listener.c
+@@ -48,3 +48,18 @@ const struct hrpc_method_def_interp4 adsp_listener_next2_def = {
+ 	.n_inner_types = 0,
+ 	.inner_types = NULL,
+ };
++
++struct hrpc_arg_def_interp4 adsp_listener_get_in_bufs2_args[] = {
++	{ HRPC_ARG_WORD, sizeof(uint32_t) },
++	{ HRPC_ARG_WORD, sizeof(uint32_t) },
++	{ HRPC_ARG_OUT_BLOB, sizeof(uint32_t) },
++	{ HRPC_ARG_OUT_BLOB_SEQ, sizeof(char) },
++};
++
++const struct hrpc_method_def_interp4 adsp_listener_get_in_bufs2_def = {
++	.msg_id = 5,
++	.n_args = HRPC_ARRAY_SIZE(adsp_listener_get_in_bufs2_args),
++	.args = adsp_listener_get_in_bufs2_args,
++	.n_inner_types = 0,
++	.inner_types = NULL,
++};
+diff --git a/hexagonrpcd/interface/adsp_listener.h b/hexagonrpcd/interface/adsp_listener.h
+index 362d775..7da9eb5 100644
+--- a/hexagonrpcd/interface/adsp_listener.h
++++ b/hexagonrpcd/interface/adsp_listener.h
+@@ -51,4 +51,16 @@ static inline int adsp_listener_next2(int fd,
+ 			  inbufs_size, (void *) inbufs);
+ }
+ 
++extern struct hrpc_method_def_interp4 adsp_listener_get_in_bufs2_def;
++static inline int adsp_listener_get_in_bufs2(int fd,
++					     uint32_t rctx,
++					     uint32_t offset,
++					     uint32_t *inbufs_len,
++					     uint32_t inbufs_size, char *inbufs)
++{
++	return hexagonrpc(&adsp_listener_get_in_bufs2_def, fd, ADSP_LISTENER,
++			  rctx, offset, inbufs_len,
++			  inbufs_size, (void *) inbufs);
++}
++
+ #endif /* INTERFACE_ADSP_LISTENER_H */
+diff --git a/hexagonrpcd/listener.c b/hexagonrpcd/listener.c
+index 4bb6b89..a2e4fdd 100644
+--- a/hexagonrpcd/listener.c
++++ b/hexagonrpcd/listener.c
+@@ -25,6 +25,7 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#include <string.h>
+ 
+ #include "interface/adsp_listener.h"
+ #include "iobuffer.h"
+@@ -426,6 +427,7 @@ static int return_for_next_invoke(int fd,
+ {
+ 	struct fastrpc_decoder_context *ctx;
+ 	char inbufs[256];
++	char *large = NULL;
+ 	char *outbufs = NULL;
+ 	uint32_t inbufs_len;
+ 	uint32_t outbufs_len;
+@@ -457,10 +459,30 @@ static int return_for_next_invoke(int fd,
+ 		goto err_free_outbufs;
+ 	}
+ 
++	/*
++	 * Only the first 256 bytes come with the request, fetch the rest of
++	 * larger inputs (e.g. file writes) separately.
++	 */
+ 	if (inbufs_len > 256) {
+-		fprintf(stderr, "Large (>256B) input buffers aren't implemented\n");
+-		ret = -1;
+-		goto err_free_outbufs;
++		uint32_t req;
++
++		large = malloc(inbufs_len);
++		if (large == NULL) {
++			perror("Could not allocate input buffer");
++			ret = -1;
++			goto err_free_outbufs;
++		}
++
++		memcpy(large, inbufs, 256);
++
++		ret = adsp_listener_get_in_bufs2(fd, *rctx, 256, &req,
++						 inbufs_len - 256, &large[256]);
++		if (ret || req > inbufs_len) {
++			fprintf(stderr, "Could not fetch %u bytes of input: %d\n",
++					inbufs_len, ret);
++			ret = -1;
++			goto err_free_outbufs;
++		}
+ 	}
+ 
+ 	ctx = inbuf_decode_start(*sc);
+@@ -470,7 +492,7 @@ static int return_for_next_invoke(int fd,
+ 		goto err_free_outbufs;
+ 	}
+ 
+-	ret = inbuf_decode(ctx, inbufs_len, inbufs);
++	ret = inbuf_decode(ctx, inbufs_len, large != NULL ? large : inbufs);
+ 	if (ret) {
+ 		perror("Could not decode");
+ 		goto err_free_outbufs;
+@@ -485,6 +507,7 @@ static int return_for_next_invoke(int fd,
+ 	*decoded = inbuf_decode_finish(ctx);
+ 
+ err_free_outbufs:
++	free(large);
+ 	free(outbufs);
+ 	return ret;
+ }
+-- 
+2.47.3
+

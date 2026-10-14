@@ -1,0 +1,2 @@
+# Xiaomi Diting: serve the sensor DSP (SLPI) once its FastRPC channel is up.
+KERNEL=="fastrpc-sdsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="diting-sensors.service"

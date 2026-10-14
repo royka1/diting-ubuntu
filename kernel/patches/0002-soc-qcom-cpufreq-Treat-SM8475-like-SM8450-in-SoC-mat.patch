@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 19:45:18 +0200
+Subject: [PATCH 02/46] soc: qcom: cpufreq: Treat SM8475 like SM8450 in SoC
+ match tables
+
+SM8475 is a higher-binned SM8450 derivative. Add its top-level
+compatible to the cpufreq-dt blocklist (CPU frequency is handled by
+qcom-cpufreq-hw), the UBWC configuration table and the protection
+domain mapper, reusing the SM8450 data.
+
+Local Diting bring-up patch, not submitted upstream.
+---
+ drivers/cpufreq/cpufreq-dt-platdev.c | 1 +
+ drivers/soc/qcom/qcom_pd_mapper.c    | 1 +
+ drivers/soc/qcom/ubwc_config.c       | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/drivers/cpufreq/cpufreq-dt-platdev.c b/drivers/cpufreq/cpufreq-dt-platdev.c
+index ff1204c66..54a1c6ad8 100644
+--- a/drivers/cpufreq/cpufreq-dt-platdev.c
++++ b/drivers/cpufreq/cpufreq-dt-platdev.c
+@@ -183,6 +183,7 @@ static const struct of_device_id blocklist[] __initconst = {
+ 	{ .compatible = "qcom,sm8250", },
+ 	{ .compatible = "qcom,sm8350", },
+ 	{ .compatible = "qcom,sm8450", },
++	{ .compatible = "qcom,sm8475", },
+ 	{ .compatible = "qcom,sm8550", },
+ 	{ .compatible = "qcom,sm8650", },
+ 
+diff --git a/drivers/soc/qcom/qcom_pd_mapper.c b/drivers/soc/qcom/qcom_pd_mapper.c
+index 0dc1a7946..c455d7076 100644
+--- a/drivers/soc/qcom/qcom_pd_mapper.c
++++ b/drivers/soc/qcom/qcom_pd_mapper.c
+@@ -622,6 +622,7 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
+ 	{ .compatible = "qcom,sm8250", .data = sm8250_domains, },
+ 	{ .compatible = "qcom,sm8350", .data = sm8350_domains, },
+ 	{ .compatible = "qcom,sm8450", .data = sm8350_domains, },
++	{ .compatible = "qcom,sm8475", .data = sm8350_domains, },
+ 	{ .compatible = "qcom,sm8550", .data = sm8550_domains, },
+ 	{ .compatible = "qcom,sm8650", .data = sm8550_domains, },
+ 	{ .compatible = "qcom,sm8750", .data = sm8550_domains, },
+diff --git a/drivers/soc/qcom/ubwc_config.c b/drivers/soc/qcom/ubwc_config.c
+index 3fe47d8f0..c69ce8fe3 100644
+--- a/drivers/soc/qcom/ubwc_config.c
++++ b/drivers/soc/qcom/ubwc_config.c
+@@ -292,6 +292,7 @@ static const struct of_device_id qcom_ubwc_configs[] __maybe_unused = {
+ 	{ .compatible = "qcom,sm8250", .data = &sm8250_data, },
+ 	{ .compatible = "qcom,sm8350", .data = &sm8350_data, },
+ 	{ .compatible = "qcom,sm8450", .data = &sm8350_data, },
++	{ .compatible = "qcom,sm8475", .data = &sm8350_data, },
+ 	{ .compatible = "qcom,sm8550", .data = &sm8550_data, },
+ 	{ .compatible = "qcom,sm8650", .data = &sm8550_data, },
+ 	{ .compatible = "qcom,sm8750", .data = &sm8750_data, },

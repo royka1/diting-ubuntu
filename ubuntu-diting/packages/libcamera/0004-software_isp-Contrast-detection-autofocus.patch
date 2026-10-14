@@ -1,0 +1,566 @@
+From af48f95976027eb4f040efbd79d6b429b603e427 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 19:50:30 +0200
+Subject: [PATCH] software_isp: Contrast detection autofocus
+
+Focus measure in the CPU statistics (absolute second derivative of green
+in the centre half of the window) and an Af algorithm for the simple IPA
+with AfMode (manual, auto, continuous; continuous by default), AfTrigger,
+LensPosition and AfState: a coarse then fine scan of the lens range with
+settle frames after each move, and a rescan in continuous mode when the
+focus measure at the chosen position changes for several frames. The lens
+is moved directly, also when delayed controls are used, and only when its
+position changes; no lens control is sent without a lens.
+
+Based on the software ISP focus control and the autofocus experiments of
+Vasiliy Doylov and Pavel Machek (millicam_af_6).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/swisp_stats.h       |   5 +
+ .../internal/software_isp/swstats_cpu.h       |   8 +
+ src/ipa/simple/algorithms/af.cpp              | 203 ++++++++++++++++--
+ src/ipa/simple/algorithms/af.h                |  11 +-
+ src/ipa/simple/ipa_context.h                  |  16 ++
+ src/ipa/simple/soft_simple.cpp                |   7 +-
+ src/libcamera/pipeline/simple/simple.cpp      |  22 +-
+ src/libcamera/software_isp/swstats_cpu.cpp    |  31 ++-
+ 8 files changed, 269 insertions(+), 34 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index d9d0d9b..b75ef77 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -43,6 +43,11 @@ struct SwIspStats {
+ 	 * \brief A histogram of luminance values of all the sampled pixels
+ 	 */
+ 	Histogram yHistogram;
++	/**
++	 * \brief Sum of the absolute second derivative of green along the
++	 * sampled lines in the centre of the window (focus measure)
++	 */
++	uint64_t sharpness;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index 64b3e23..a6cdf64 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -66,6 +66,7 @@ public:
+ 		    y >= (window_.y + window_.height))
+ 			return;
+ 
++		setSharpnessLine(y - window_.y);
+ 		(this->*stats0_)(src);
+ 	}
+ 
+@@ -100,12 +101,19 @@ private:
+ 
+ 	void processBayerFrame2(MappedFrameBuffer &in);
+ 
++	/* The focus measure covers the centre half of the window */
++	void setSharpnessLine(unsigned int y)
++	{
++		sharpLine_ = y >= window_.height / 4 && y < window_.height * 3 / 4;
++	}
++
+ 	processFrameFn processFrame_;
+ 
+ 	/* Variables set by configure(), used every line */
+ 	statsProcessFn stats0_;
+ 	statsProcessFn stats2_;
+ 	bool swapLines_;
++	bool sharpLine_ = false;
+ 
+ 	unsigned int ySkipMask_;
+ 
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+index b51ed95..2334797 100644
+--- a/src/ipa/simple/algorithms/af.cpp
++++ b/src/ipa/simple/algorithms/af.cpp
+@@ -3,15 +3,28 @@
+  * Copyright (C) 2025 Vasiliy Doylov <nekodevelopper@gmail.com>
+  *
+  * Auto focus
++ *
++ * Contrast detection autofocus on the software ISP's focus measure (the
++ * absolute second derivative of green in the centre of the image, divided
++ * by the green level so that exposure changes do not count as focus
++ * changes). A scan visits the lens range in coarse steps, then the
++ * neighbourhood of the best coarse position in fine steps, waiting a few
++ * statistics periods after every lens move (the statistics are gathered on
++ * every fourth frame, which is enough for a voice coil lens to settle). In continuous mode a scan is started at
++ * the beginning and again when the measure at the chosen position changes
++ * for several frames (scene change). Lens positions are on a 0..100 scale
++ * mapped linearly onto the lens driver's focus range.
+  */
+ 
+ #include "af.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <stdint.h>
+ 
+ #include <libcamera/base/log.h>
+ 
+-#include "control_ids.h"
++#include <libcamera/control_ids.h>
+ 
+ namespace libcamera {
+ 
+@@ -23,45 +36,199 @@ Af::Af()
+ {
+ }
+ 
+-int Af::init(IPAContext &context,
+-	     [[maybe_unused]] const YamlObject &tuningData)
++int Af::init(IPAContext &context, const YamlObject &tuningData)
+ {
++	settleFrames_ = tuningData["settleFrames"].get<unsigned int>(0);
++	coarseStep_ = tuningData["coarseStep"].get<double>(10.0);
++	fineStep_ = tuningData["fineStep"].get<double>(2.0);
++	changeThreshold_ = tuningData["changeThreshold"].get<double>(0.35);
++	changeFrames_ = tuningData["changeFrames"].get<unsigned int>(6);
++
+ 	context.ctrlMap[&controls::LensPosition] = ControlInfo(0.0f, 100.0f, 50.0f);
++	context.ctrlMap[&controls::AfMode] =
++		ControlInfo(controls::AfModeValues, ControlValue(controls::AfModeContinuous));
++	context.ctrlMap[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
++
+ 	return 0;
+ }
+ 
+ int Af::configure(IPAContext &context,
+ 		  [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
+-	context.activeState.knobs.focus_pos = std::optional<double>();
++	auto &af = context.activeState.af;
++
++	af = {};
++	af.mode = controls::AfModeContinuous;
++	af.state = controls::AfStateIdle;
++	af.position = 50.0;
++	context.activeState.knobs.focus_pos = af.position;
++
++	/* Without a lens there is nothing to do */
++	if (context.configuration.focus.focus_max <= context.configuration.focus.focus_min)
++		return 0;
++
++	startScan(context);
+ 
+ 	return 0;
+ }
+ 
+-void Af::queueRequest([[maybe_unused]] typename Module::Context &context,
++void Af::startScan(IPAContext &context)
++{
++	auto &af = context.activeState.af;
++
++	af.scanning = true;
++	af.fine = false;
++	af.start = 0.0;
++	af.stop = 100.0;
++	af.step = coarseStep_;
++	af.position = af.start;
++	af.bestPosition = af.start;
++	af.bestScore = 0.0;
++	af.minScore = INFINITY;
++	af.settle = settleFrames_ + 2;	/* the first move can be long */
++	af.changed = 0;
++	af.state = controls::AfStateScanning;
++
++	LOG(IPASoftAutoFocus, Debug) << "Starting scan";
++}
++
++void Af::stopScan(IPAContext &context, bool found)
++{
++	auto &af = context.activeState.af;
++
++	af.scanning = false;
++	af.position = af.bestPosition;
++	af.settle = settleFrames_ + 1;
++	af.refScore = 0.0;	/* measured once the lens is back */
++	af.changed = 0;
++	af.state = found ? controls::AfStateFocused : controls::AfStateFailed;
++
++	LOG(IPASoftAutoFocus, Debug)
++		<< "Scan done: position " << af.bestPosition
++		<< " score " << af.bestScore << " (min " << af.minScore << ")"
++		<< (found ? "" : ", no contrast peak");
++}
++
++void Af::scanStep(IPAContext &context, double score)
++{
++	auto &af = context.activeState.af;
++
++	if (score > af.bestScore) {
++		af.bestScore = score;
++		af.bestPosition = af.position;
++	}
++	af.minScore = std::min(af.minScore, score);
++
++	if (af.position + af.step <= af.stop + 1e-6) {
++		af.position += af.step;
++		af.settle = settleFrames_;
++		return;
++	}
++
++	if (!af.fine) {
++		/* Fine pass around the best coarse position */
++		af.fine = true;
++		af.start = std::clamp(af.bestPosition - coarseStep_, 0.0, 100.0);
++		af.stop = std::clamp(af.bestPosition + coarseStep_, 0.0, 100.0);
++		af.step = fineStep_;
++		af.position = af.start;
++		af.bestScore = 0.0;
++		af.settle = settleFrames_ + 1;
++		return;
++	}
++
++	/* A flat curve has no focus peak (no texture, too dark) */
++	stopScan(context, af.bestScore > af.minScore * 1.15);
++}
++
++void Af::monitor(IPAContext &context, double score)
++{
++	auto &af = context.activeState.af;
++
++	if (af.mode != controls::AfModeContinuous)
++		return;
++
++	if (af.refScore <= 0.0) {
++		af.refScore = score;
++		return;
++	}
++
++	if (std::abs(score - af.refScore) > af.refScore * changeThreshold_) {
++		if (++af.changed >= changeFrames_) {
++			LOG(IPASoftAutoFocus, Debug)
++				<< "Scene changed (" << score << " vs "
++				<< af.refScore << "), rescanning";
++			startScan(context);
++		}
++	} else {
++		af.changed = 0;
++	}
++}
++
++void Af::queueRequest(typename Module::Context &context,
+ 		      [[maybe_unused]] const uint32_t frame,
+ 		      [[maybe_unused]] typename Module::FrameContext &frameContext,
+ 		      const ControlList &controls)
+ {
+-	const auto &focus_pos = controls.get(controls::LensPosition);
+-	if (focus_pos.has_value()) {
+-		context.activeState.knobs.focus_pos = focus_pos;
+-		LOG(IPASoftAutoFocus, Debug) << "Setting focus position to " << focus_pos.value();
++	auto &af = context.activeState.af;
++
++	const auto &mode = controls.get(controls::AfMode);
++	if (mode && *mode != af.mode) {
++		af.mode = *mode;
++		af.scanning = false;
++		af.state = controls::AfStateIdle;
++		if (af.mode == controls::AfModeContinuous)
++			startScan(context);
+ 	}
+-}
+ 
+-void Af::updateFocus([[maybe_unused]] IPAContext &context, [[maybe_unused]] IPAFrameContext &frameContext, [[maybe_unused]] double exposureMSV)
+-{
+-	frameContext.lens.focus_pos = context.activeState.knobs.focus_pos.value_or(50.0) / 100.0 * (context.configuration.focus.focus_max - context.configuration.focus.focus_min);
++	const auto &position = controls.get(controls::LensPosition);
++	if (position && af.mode == controls::AfModeManual) {
++		af.position = std::clamp<double>(*position, 0.0, 100.0);
++		LOG(IPASoftAutoFocus, Debug) << "Lens position " << af.position;
++	}
++
++	const auto &trigger = controls.get(controls::AfTrigger);
++	if (trigger && af.mode == controls::AfModeAuto) {
++		if (*trigger == controls::AfTriggerStart) {
++			startScan(context);
++		} else if (*trigger == controls::AfTriggerCancel) {
++			af.scanning = false;
++			af.state = controls::AfStateIdle;
++		}
++	}
++
++	context.activeState.knobs.focus_pos = af.position;
+ }
+ 
+-void Af::process([[maybe_unused]] IPAContext &context,
++void Af::process(IPAContext &context,
+ 		 [[maybe_unused]] const uint32_t frame,
+-		 [[maybe_unused]] IPAFrameContext &frameContext,
+-		 [[maybe_unused]] const SwIspStats *stats,
+-		 [[maybe_unused]] ControlList &metadata)
++		 IPAFrameContext &frameContext,
++		 const SwIspStats *stats,
++		 ControlList &metadata)
+ {
+-	updateFocus(context, frameContext, 0);
++	auto &af = context.activeState.af;
++	const auto &focus = context.configuration.focus;
++
++	if (focus.focus_max > focus.focus_min && stats && stats->valid) {
++		/* Focus measure independent of the exposure */
++		double green = std::max<double>(stats->sum_.g(), 1.0);
++		double score = static_cast<double>(stats->sharpness) * 1e6 / green;
++
++		if (af.settle) {
++			af.settle--;
++		} else if (af.scanning) {
++			scanStep(context, score);
++		} else {
++			monitor(context, score);
++		}
++	}
++
++	context.activeState.knobs.focus_pos = af.position;
++	frameContext.lens.focus_pos = focus.focus_min +
++		std::lround(af.position / 100.0 * (focus.focus_max - focus.focus_min));
++
++	metadata.set(controls::AfState, af.state);
++	metadata.set(controls::LensPosition, static_cast<float>(af.position));
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Af, "Af")
+diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
+index a575ef1..84925cc 100644
+--- a/src/ipa/simple/algorithms/af.h
++++ b/src/ipa/simple/algorithms/af.h
+@@ -32,7 +32,16 @@ public:
+ 		     ControlList &metadata) override;
+ 
+ private:
+-	void updateFocus(IPAContext &context, IPAFrameContext &frameContext, double focus);
++	void startScan(IPAContext &context);
++	void stopScan(IPAContext &context, bool found);
++	void scanStep(IPAContext &context, double score);
++	void monitor(IPAContext &context, double score);
++
++	unsigned int settleFrames_ = 0;
++	double coarseStep_ = 10.0;
++	double fineStep_ = 2.0;
++	double changeThreshold_ = 0.35;
++	unsigned int changeFrames_ = 6;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index a436fc7..a4e9696 100644
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -66,6 +66,22 @@ struct IPAActiveState {
+ 		/* 0..100 range, 50.0 = normal */
+ 		std::optional<double> focus_pos;
+ 	} knobs;
++
++	/* Autofocus, lens positions on a 0..100 scale (0 = infinity end) */
++	struct {
++		int mode;		/* controls::AfModeEnum */
++		int state;		/* controls::AfStateEnum */
++		bool scanning;
++		bool fine;		/* fine pass of the scan */
++		double position;	/* lens position commanded */
++		double start, stop, step;
++		double bestPosition;
++		double bestScore;
++		double minScore;
++		double refScore;	/* focus measure at the chosen position */
++		unsigned int settle;	/* frames to skip after a lens move */
++		unsigned int changed;	/* frames the scene differs from refScore */
++	} af;
+ };
+ 
+ struct IPAFrameContext : public FrameContext {
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index 4f63fa3..f5c8f43 100644
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -214,14 +214,14 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 	context_.frameContexts.clear();
+ 
+ 	if (lensInfoMap_.empty()) {
+-		LOG(IPASoft, Warning) << "No camera leans found! Focus control disabled.";
++		LOG(IPASoft, Debug) << "No lens, focus control disabled";
+ 		context_.configuration.focus.focus_min = 0;
+ 		context_.configuration.focus.focus_max = 0;
+ 	} else {
+ 		const ControlInfo &lensInfo = lensInfoMap_.find(V4L2_CID_FOCUS_ABSOLUTE)->second;
+ 		context_.configuration.focus.focus_min = lensInfo.min().get<int32_t>();
+ 		context_.configuration.focus.focus_max = lensInfo.max().get<int32_t>();
+-		LOG(IPASoft, Warning) << "Camera leans found! Focus: " << context_.configuration.focus.focus_min << "-" << context_.configuration.focus.focus_max;
++		LOG(IPASoft, Debug) << "Lens focus range " << context_.configuration.focus.focus_min << "-" << context_.configuration.focus.focus_max;
+ 	}
+ 
+ 	context_.configuration.agc.lineDuration =
+@@ -339,7 +339,8 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 		  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
+ 
+ 	ControlList lens_ctrls(lensInfoMap_);
+-	lens_ctrls.set(V4L2_CID_FOCUS_ABSOLUTE, frameContext.lens.focus_pos);
++	if (!lensInfoMap_.empty())
++		lens_ctrls.set(V4L2_CID_FOCUS_ABSOLUTE, frameContext.lens.focus_pos);
+ 
+ 	setSensorControls.emit(ctrls, lens_ctrls);
+ }
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 4079f09..863e391 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -375,6 +375,7 @@ private:
+ 	void ispStatsReady(uint32_t frame, uint32_t bufferId);
+ 	void metadataReady(uint32_t frame, const ControlList &metadata);
+ 	void setSensorControls(const ControlList &sensorControls, const ControlList &lensControls);
++	int32_t lastFocusPosition_ = -1;
+ };
+ 
+ class SimpleCameraConfiguration : public CameraConfiguration
+@@ -1046,6 +1047,17 @@ void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata
+ 
+ void SimpleCameraData::setSensorControls(const ControlList &sensorControls, const ControlList &lensControls)
+ {
++	/* The lens is not handled by delayedCtrls_: move it right away */
++	CameraLens *focusLens = sensor_->focusLens();
++	if (focusLens && lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE)) {
++		int32_t position = lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>();
++
++		if (position != lastFocusPosition_) {
++			focusLens->setFocusPosition(position);
++			lastFocusPosition_ = position;
++		}
++	}
++
+ 	delayedCtrls_->push(sensorControls);
+ 	/*
+ 	 * Directly apply controls now if there is no frameStart signal.
+@@ -1060,16 +1072,6 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls, cons
+ 
+ 	ControlList ctrls(sensorControls);
+ 	sensor_->setControls(&ctrls);
+-
+-	CameraLens *focusLens = sensor_->focusLens();
+-	if (!focusLens)
+-		return;
+-
+-	if (!lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE))
+-		return;
+-
+-	const ControlValue &focusValue = lensControls.get(V4L2_CID_FOCUS_ABSOLUTE);
+-	focusLens->setFocusPosition(focusValue.get<int32_t>());
+ }
+ 
+ /* Retrieve all source pads connected to a sink pad through active routes. */
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 5c3011a..21dde39 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include "libcamera/internal/software_isp/swstats_cpu.h"
+ 
++#include <cstdlib>
++
+ #include <libcamera/base/log.h>
+ 
+ #include <libcamera/stream.h>
+@@ -172,7 +174,10 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+                                           \
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+-	uint64_t sumB = 0;
++	uint64_t sumB = 0;                \
++	int sharpG0 = 0, sharpG1 = 0;     \
++	unsigned int sharpN = 0;          \
++	uint64_t sharp = 0;
+ 
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+ 	sumR += r;                         \
+@@ -184,10 +189,25 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 	yVal += b * kBlueYMul;             \
+ 	stats_.yHistogram[yVal * SwIspStats::kYHistogramSize / (256 * 256 * (div))]++;
+ 
++/*
++ * Focus measure: absolute second derivative of green along the line, in the
++ * centre half of the window (xpix is the pixel position of the sample).
++ */
++#define SWSTATS_ACCUMULATE_SHARPNESS(xpix)                                  \
++	if (sharpLine_ && (xpix) >= window_.width / 4 &&                    \
++	    (xpix) < window_.width * 3 / 4) {                               \
++		if (sharpN >= 2)                                            \
++			sharp += std::abs(static_cast<int>(g) - 2 * sharpG1 + sharpG0); \
++		sharpN++;                                                   \
++		sharpG0 = sharpG1;                                          \
++		sharpG1 = g;                                                \
++	}
++
+ #define SWSTATS_FINISH_LINE_STATS() \
+ 	stats_.sum_.r() += sumR;    \
+ 	stats_.sum_.g() += sumG;    \
+-	stats_.sum_.b() += sumB;
++	stats_.sum_.b() += sumB;    \
++	stats_.sharpness += sharp;
+ 
+ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[])
+ {
+@@ -209,6 +229,7 @@ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[])
+ 		g = (g + g2) / 2;
+ 
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
++		SWSTATS_ACCUMULATE_SHARPNESS(x)
+ 	}
+ 
+ 	SWSTATS_FINISH_LINE_STATS()
+@@ -235,6 +256,7 @@ void SwStatsCpu::statsBGGR10Line0(const uint8_t *src[])
+ 
+ 		/* divide Y by 4 for 10 -> 8 bpp value */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(4)
++		SWSTATS_ACCUMULATE_SHARPNESS(x)
+ 	}
+ 
+ 	SWSTATS_FINISH_LINE_STATS()
+@@ -261,6 +283,7 @@ void SwStatsCpu::statsBGGR12Line0(const uint8_t *src[])
+ 
+ 		/* divide Y by 16 for 12 -> 8 bpp value */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(16)
++		SWSTATS_ACCUMULATE_SHARPNESS(x)
+ 	}
+ 
+ 	SWSTATS_FINISH_LINE_STATS()
+@@ -287,6 +310,7 @@ void SwStatsCpu::statsBGGR10PLine0(const uint8_t *src[])
+ 		g = (g + g2) / 2;
+ 		/* Data is already 8 bits, divide by 1 */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
++		SWSTATS_ACCUMULATE_SHARPNESS(x * 4 / 5)
+ 	}
+ 
+ 	SWSTATS_FINISH_LINE_STATS()
+@@ -313,6 +337,7 @@ void SwStatsCpu::statsGBRG10PLine0(const uint8_t *src[])
+ 		g = (g + g2) / 2;
+ 		/* Data is already 8 bits, divide by 1 */
+ 		SWSTATS_ACCUMULATE_LINE_STATS(1)
++		SWSTATS_ACCUMULATE_SHARPNESS(x * 4 / 5)
+ 	}
+ 
+ 	SWSTATS_FINISH_LINE_STATS()
+@@ -333,6 +358,7 @@ void SwStatsCpu::startFrame(uint32_t frame)
+ 		LOG(SwStatsCpu, Error) << "Calling startFrame() without setWindow()";
+ 
+ 	stats_.sum_ = RGB<uint64_t>({ 0, 0, 0 });
++	stats_.sharpness = 0;
+ 	stats_.yHistogram.fill(0);
+ }
+ 
+@@ -504,6 +530,7 @@ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
+ 		/* linePointers[0] is not used by any stats0_ functions */
+ 		linePointers[1] = src;
+ 		linePointers[2] = src + stride_;
++		setSharpnessLine(y);
+ 		(this->*stats0_)(linePointers);
+ 		src += stride_ * 2;
+ 	}
+-- 
+2.47.3
+

@@ -1,0 +1,9 @@
+[Unit]
+Description=Provide the VA-API driver to snap Chromium
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/diting-chromium-vaapi
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+	systemctl unmask q6voiced.service >/dev/null 2>&1 || true
+	systemctl --global unmask wys.service >/dev/null 2>&1 || true
+fi
+if [ "$1" = remove ] || [ "$1" = abort-install ] || [ "$1" = disappear ]; then
+	dpkg-divert --package device-xiaomi-diting --rename \
+		--divert /usr/share/dbus-1/services/org.mobian_project.CallAudio.service.callaudiod \
+		--remove /usr/share/dbus-1/services/org.mobian_project.CallAudio.service >/dev/null
+fi
+#DEBHELPER#

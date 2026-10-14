@@ -1,0 +1,28 @@
+From e508c5a59b1eeecfe6f6059417aaf01f0985de90 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 14:44:54 +0200
+Subject: [PATCH 2/8] hexagonrpcd: rpcd_builder: Map sns_reg_version to its own
+ file
+
+The sns_reg_version mapping pointed at the sns_reg.conf path. Use the
+sensors/sns_reg_version file under the prefix instead.
+---
+ hexagonrpcd/rpcd_builder.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hexagonrpcd/rpcd_builder.c b/hexagonrpcd/rpcd_builder.c
+index 44ee71d..1a63383 100644
+--- a/hexagonrpcd/rpcd_builder.c
++++ b/hexagonrpcd/rpcd_builder.c
+@@ -144,7 +144,7 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 
+ 	if (sns_reg_version != NULL) {
+ 		strcpy(sns_reg_version, prefix);
+-		strcat(sns_reg_version, SNS_REG_CONFIG);
++		strcat(sns_reg_version, SNS_REG_VERSION);
+ 	}
+ 
+ 	if (sns_reg_config != NULL) {
+-- 
+2.47.3
+

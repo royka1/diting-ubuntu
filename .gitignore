@@ -1,0 +1,14 @@
+# Upstream/community/Android trees are fetched by scripts, not committed
+/references/
+/kernel/upstream/
+/kernel/build/
+/kernel/.gnupg/
+/kernel/clone.log
+# Private dumps from the owner's phone (serials, partitions, firmware)
+/device-data/
+# Host tooling
+/tools/venv/
+# Generated
+/ubuntu-diting/work/
+/ubuntu-diting/output/
+__pycache__/

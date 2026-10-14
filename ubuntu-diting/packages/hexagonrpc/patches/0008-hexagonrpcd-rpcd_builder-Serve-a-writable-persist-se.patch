@@ -1,0 +1,125 @@
+From 2a0d1aa1b04e5aa6d520c503a2e49f0c3fb28710 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 15:10:23 +0200
+Subject: [PATCH 8/8] hexagonrpcd: rpcd_builder: Serve a writable persist
+ sensor directory
+
+If <root>/sensors/persist exists, serve it writable as
+/mnt/vendor/persist/sensors/registry (registry/, sns_reg_version and the
+registry's temp.json). Otherwise keep the read-only mappings.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ hexagonrpcd/rpcd_builder.c | 53 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/hexagonrpcd/rpcd_builder.c b/hexagonrpcd/rpcd_builder.c
+index 1a63383..77229fa 100644
+--- a/hexagonrpcd/rpcd_builder.c
++++ b/hexagonrpcd/rpcd_builder.c
+@@ -23,6 +23,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include <sys/stat.h>
++
+ #include "hexagonfs.h"
+ 
+ // These paths are relative, with a prepended '/' if missing from previous segments
+@@ -32,6 +34,7 @@
+ #define SENSORS_REGISTRY	"/sensors/registry/"
+ #define SNS_REG_VERSION		"/sensors/sns_reg_version"
+ #define SNS_REG_CONFIG		"/sensors/sns_reg.conf"
++#define SENSORS_PERSIST		"/sensors/persist/"
+ #define SYSFS_SOCINFO		"/socinfo/"
+ 
+ static struct hexagonfs_dirent *hfs_mkdir(const char *name, size_t n_ents, ...)
+@@ -90,6 +93,21 @@ static struct hexagonfs_dirent *hfs_map(const char *name, const char *path)
+ 	return file;
+ }
+ 
++static struct hexagonfs_dirent *hfs_map_rw(const char *name, const char *path)
++{
++	struct hexagonfs_dirent *file;
++
++	file = malloc(sizeof(struct hexagonfs_dirent));
++	if (file == NULL)
++		return NULL;
++
++	file->name = name;
++	file->ops = &hexagonfs_mapped_rw_ops;
++	file->u.phys = path;
++
++	return file;
++}
++
+ static struct hexagonfs_dirent *hfs_map_or_empty(const char *name, const char *path)
+ {
+ 	struct hexagonfs_dirent *file;
+@@ -113,6 +131,8 @@ static struct hexagonfs_dirent *hfs_map_or_empty(const char *name, const char *p
+ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ {
+ 	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_version, *sns_reg_config, *socinfo;
++	char *sns_persist;
++	struct stat st;
+ 	size_t n_prefix;
+ 	struct hexagonfs_dirent *persist_dir, *vendor_dir;
+ 
+@@ -124,6 +144,7 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 	sns_reg_version = malloc(n_prefix + strlen(SNS_REG_VERSION) + 1);
+ 	sns_reg_config = malloc(n_prefix + strlen(SNS_REG_CONFIG) + 1);
+ 	socinfo = malloc(n_prefix + strlen(SYSFS_SOCINFO) + 1);
++	sns_persist = malloc(n_prefix + strlen(SENSORS_PERSIST) + 1);
+ 
+ 	dsp_libs = malloc(n_prefix + strlen(DSP_LIBS) + strlen(dsp) + 1);
+ 
+@@ -152,6 +173,11 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 		strcat(sns_reg_config, SNS_REG_CONFIG);
+ 	}
+ 
++	if (sns_persist != NULL) {
++		strcpy(sns_persist, prefix);
++		strcat(sns_persist, SENSORS_PERSIST);
++	}
++
+ 	if (socinfo != NULL) {
+ 		strcpy(socinfo, prefix);
+ 		strcat(socinfo, SYSFS_SOCINFO);
+@@ -167,14 +193,27 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ 	 * Some platforms need this in / and some need it in /mnt/vendor. Form
+ 	 * a hard link between both locations.
+ 	 */
+-	persist_dir = hfs_mkdir("persist", 1,
+-				hfs_mkdir("sensors", 1,
+-					hfs_mkdir("registry", 2,
+-						hfs_map("registry", sns_reg),
+-						hfs_map("sns_reg_version", sns_reg_version)
++	if (sns_persist != NULL && !stat(sns_persist, &st) && S_ISDIR(st.st_mode)) {
++		/*
++		 * A writable copy of the persist sensor directory: the sensor
++		 * registry stores its state there (registry/, sns_reg_version,
++		 * temp.json, ...).
++		 */
++		persist_dir = hfs_mkdir("persist", 1,
++					hfs_mkdir("sensors", 1,
++						hfs_map_rw("registry", sns_persist)
+ 					)
+-				)
+-		      );
++			      );
++	} else {
++		persist_dir = hfs_mkdir("persist", 1,
++					hfs_mkdir("sensors", 1,
++						hfs_mkdir("registry", 2,
++							hfs_map("registry", sns_reg),
++							hfs_map("sns_reg_version", sns_reg_version)
++						)
++					)
++			      );
++	}
+ 
+ 	/*
+ 	 * Some platforms need vendor in / and some need it in /system. Form
+-- 
+2.47.3
+

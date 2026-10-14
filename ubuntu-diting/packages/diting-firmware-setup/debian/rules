@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+G = graphservices
+
+%:
+	dh $@
+
+# acdb-query reads the phone's ACDB with Qualcomm's AudioReach ACDB library
+# (BSD-3-Clause-Clear) to build the voice call topology
+override_dh_auto_build:
+	$(CC) -O2 -w -Wno-incompatible-pointer-types -D'__unused=__attribute__((unused))' \
+		-o tools/acdb/acdb-query tools/acdb/acdb-query.c tools/acdb/logstub.c $(G)/acdb/src/*.c \
+		$(G)/ar_osal/src/linux/ar_osal_file_io.c $(G)/ar_osal/src/linux/ar_osal_heap.c \
+		$(G)/ar_osal/src/linux/ar_osal_mem_op.c $(G)/ar_osal/src/linux/ar_osal_mutex.c \
+		$(G)/ar_osal/src/linux/ar_osal_string.c \
+		-I$(G)/acdb/inc -I$(G)/acdb/api -I$(G)/ar_osal/api $(LDFLAGS)
+
+override_dh_auto_install:
+override_dh_auto_test:
+
+# never run (and reboot) from a package installation; only at boot
+override_dh_installsystemd:
+	dh_installsystemd --no-start

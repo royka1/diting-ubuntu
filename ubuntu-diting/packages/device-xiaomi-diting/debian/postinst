@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ] && command -v update-initramfs >/dev/null; then
+	for v in $(ls /lib/modules 2>/dev/null); do
+		case "$v" in *-diting) update-initramfs -u -k "$v" || true ;; esac
+	done
+fi
+# Call audio is diting-voice-call's: q6voiced (qcom-phone-utils) and wys
+# (phosh) would open the voice PCMs themselves (a different path, q6voice).
+if [ "$1" = configure ]; then
+	systemctl mask q6voiced.service >/dev/null 2>&1 || true
+	systemctl --global mask wys.service >/dev/null 2>&1 || true
+fi
+#DEBHELPER#

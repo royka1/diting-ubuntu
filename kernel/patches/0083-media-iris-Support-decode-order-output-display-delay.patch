@@ -1,0 +1,150 @@
+From fc89eb0658b268877a5ea188f2703108f7dfdb5b Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 01:50:10 +0200
+Subject: [PATCH] media: iris: Support decode order output (display delay
+ controls)
+
+Add V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE and
+V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY to the Gen2 decoder. With the delay
+enabled and set to 0, the driver asks the firmware for decode order output
+(HFI_PROP_DECODE_ORDER_OUTPUT), as the vendor driver does for the same
+controls: each picture is returned as soon as its frame is decoded.
+
+Clients that track pictures per frame need this, e.g. a VA-API to V4L2
+translation layer, which otherwise waits for B-frame reordering that the
+VA-API caller does not know about. Nothing is sent to the firmware unless
+a client sets the controls, so the default behaviour is unchanged.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/iris/iris_ctrls.c | 29 +++++++++++++++++++
+ drivers/media/platform/qcom/iris/iris_ctrls.h |  1 +
+ .../media/platform/qcom/iris/iris_hfi_gen2.c  | 17 +++++++++++
+ .../qcom/iris/iris_hfi_gen2_defines.h         |  1 +
+ .../platform/qcom/iris/iris_platform_common.h |  2 ++
+ 5 files changed, 50 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.c b/drivers/media/platform/qcom/iris/iris_ctrls.c
+index 391e1fc5f..330f92ca9 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -22,6 +22,10 @@ static inline bool iris_valid_cap_id(enum platform_inst_fw_cap_type cap_id)
+ static enum platform_inst_fw_cap_type iris_get_cap_id(u32 id)
+ {
+ 	switch (id) {
++	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:
++		return DISPLAY_DELAY_ENABLE;
++	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
++		return DISPLAY_DELAY;
+ 	case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+ 		return PROFILE_H264;
+ 	case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+@@ -165,6 +169,10 @@ static u32 iris_get_v4l2_id(enum platform_inst_fw_cap_type cap_id)
+ 		return 0;
+ 
+ 	switch (cap_id) {
++	case DISPLAY_DELAY_ENABLE:
++		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
++	case DISPLAY_DELAY:
++		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
+ 	case PROFILE_H264:
+ 		return V4L2_CID_MPEG_VIDEO_H264_PROFILE;
+ 	case PROFILE_HEVC:
+@@ -507,6 +515,27 @@ int iris_set_u32(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+ 					     &hfi_value, sizeof(u32));
+ }
+ 
++/*
++ * A display delay of 0 asks for pictures in decode order: each frame is
++ * returned as soon as it is decoded instead of after reordering. The
++ * firmware default (display order) is left alone otherwise.
++ */
++int iris_set_decode_order(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
++{
++	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
++	u32 hfi_id = inst->fw_caps[cap_id].hfi_id;
++	u32 decode_order = 1;
++
++	if (!inst->fw_caps[DISPLAY_DELAY_ENABLE].value || inst->fw_caps[DISPLAY_DELAY].value)
++		return 0;
++
++	return hfi_ops->session_set_property(inst, hfi_id,
++					     HFI_HOST_FLAGS_NONE,
++					     iris_get_port_info(inst, cap_id),
++					     HFI_PAYLOAD_U32,
++					     &decode_order, sizeof(u32));
++}
++
+ int iris_set_stage(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
+ {
+ 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.h b/drivers/media/platform/qcom/iris/iris_ctrls.h
+index 3c462ec91..10993b868 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.h
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.h
+@@ -16,6 +16,7 @@ void iris_session_init_caps(struct iris_core *core);
+ int iris_set_u32_enum(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_stage(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_pipe(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
++int iris_set_decode_order(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_u32(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_profile(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_level(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+index 2b593d423..d519dc007 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+@@ -252,6 +252,23 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8550_dec[] = {
+ 		.value = 1,
+ 		.hfi_id = HFI_PROP_PIC_ORDER_CNT_TYPE,
+ 	},
++	{
++		.cap_id = DISPLAY_DELAY_ENABLE,
++		.min = 0,
++		.max = 1,
++		.step_or_mask = 1,
++		.value = 0,
++		.hfi_id = HFI_PROP_DECODE_ORDER_OUTPUT,
++		.flags = CAP_FLAG_INPUT_PORT,
++		.set = iris_set_decode_order,
++	},
++	{
++		.cap_id = DISPLAY_DELAY,
++		.min = 0,
++		.max = 16383,
++		.step_or_mask = 1,
++		.value = 0,
++	},
+ 	{
+ 		.cap_id = CODED_FRAMES,
+ 		.min = CODED_FRAMES_PROGRESSIVE,
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+index 776b21cd1..8c5a4f561 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+@@ -123,6 +123,7 @@ enum hfi_flip {
+ #define HFI_PROP_PICTURE_TYPE			0x03000162
+ #define HFI_PROP_DEC_DEFAULT_HEADER		0x03000168
+ #define HFI_PROP_DEC_START_FROM_RAP_FRAME	0x03000169
++#define HFI_PROP_DECODE_ORDER_OUTPUT		0x0300015b
+ #define HFI_PROP_NO_OUTPUT			0x0300016a
+ #define HFI_PROP_BUFFER_MARK			0x0300016c
+ #define HFI_PROP_WORST_COMPRESSION_RATIO	0x03000174
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index 35b3750e5..83ee9fc59 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -184,6 +184,8 @@ enum platform_inst_fw_cap_type {
+ 	LAYER3_BITRATE_HEVC,
+ 	LAYER4_BITRATE_HEVC,
+ 	LAYER5_BITRATE_HEVC,
++	DISPLAY_DELAY_ENABLE,
++	DISPLAY_DELAY,
+ 	INST_FW_CAP_MAX,
+ };
+ 
+-- 
+2.55.0
+

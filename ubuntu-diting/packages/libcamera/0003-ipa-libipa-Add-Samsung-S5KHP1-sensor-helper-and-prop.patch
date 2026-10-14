@@ -1,0 +1,64 @@
+From b235d89a0bf5bdc415bfabad0eb764236d36700d Mon Sep 17 00:00:00 2001
+From: diting <diting@localhost>
+Date: Tue, 13 Oct 2026 19:50:30 +0200
+Subject: [PATCH 3/4] ipa: libipa: Add Samsung S5KHP1 sensor helper and
+ properties
+
+---
+ src/ipa/libipa/camera_sensor_helper.cpp          | 12 ++++++++++++
+ .../sensor/camera_sensor_properties.cpp          | 16 ++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index bad76e1..1278d32 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -789,6 +789,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov13858", CameraSensorHelperOv13858)
+ 
++class CameraSensorHelperS5khp1 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5khp1()
++	{
++		/* 0x40 at 10 bits; analogue gain code 32 = 1x (CCS) */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5khp1", CameraSensorHelperS5khp1)
++
+ class CameraSensorHelperS5k4h7 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index efa6391..181612e 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -503,6 +503,22 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5khp1", {
++			.unitCellSize = { 640, 640 },
++			.testPatternModes = {
++				{ controls::draft::TestPatternModeOff, 0 },
++				{ controls::draft::TestPatternModeSolidColor, 1 },
++				{ controls::draft::TestPatternModeColorBars, 2 },
++				{ controls::draft::TestPatternModeColorBarsFadeToGray, 3 },
++				{ controls::draft::TestPatternModePn9, 4 },
++			},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "s5k4h7", {
+ 			.unitCellSize = { 1120, 1120 },
+ 			.testPatternModes = {
+-- 
+2.47.3
+

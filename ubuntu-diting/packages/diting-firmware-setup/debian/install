@@ -1,0 +1,11 @@
+diting-firmware-setup usr/sbin
+tools/diting-build-firmware usr/lib/diting-firmware-setup
+tools/lpmeta.py usr/lib/diting-firmware-setup
+tools/mdt-squash.py usr/lib/diting-firmware-setup
+tools/camera/chromatix-to-camregs.py usr/lib/diting-firmware-setup/camera
+tools/camera/chromatix_regs.py usr/lib/diting-firmware-setup/camera
+tools/acdb/acdb-query usr/lib/diting-firmware-setup/acdb
+tools/acdb/build-voice-tplg.sh usr/lib/diting-firmware-setup/acdb
+tools/acdb/voice-tplg.py usr/lib/diting-firmware-setup/acdb
+audioreach-topology usr/lib/diting-firmware-setup
+audio-topology usr/lib/diting-firmware-setup

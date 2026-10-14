@@ -1,0 +1,5 @@
+# The Diting needs its own kernel; Ubuntu's generic kernels have no
+# sm8475-xiaomi-diting support and cannot be booted by ABL as-is.
+Package: linux-image-generic linux-generic linux-image-*-generic linux-modules-*-generic
+Pin: release *
+Pin-Priority: -1

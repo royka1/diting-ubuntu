@@ -1,0 +1,63 @@
+From 54b94427a4935910897de7821c6e1d3f12784b97 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 18:47:07 +0200
+Subject: [PATCH 75/76] media: i2c: ak7375: Add AK7314 support
+
+10-bit sibling of the AK7375 (position << 6 in register 0, mode register
+2 with active 0x00 and standby 0x40), as described by the Xiaomi 12T Pro
+main camera module data, including its 2.2 ms power-on delay.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../bindings/media/i2c/asahi-kasei,ak7375.yaml    |  1 +
+ drivers/media/i2c/ak7375.c                        | 15 +++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml b/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
+index fe312cc6a..06871657b 100644
+--- a/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
++++ b/Documentation/devicetree/bindings/media/i2c/asahi-kasei,ak7375.yaml
+@@ -16,6 +16,7 @@ description:
+ properties:
+   compatible:
+     enum:
++      - asahi-kasei,ak7314
+       - asahi-kasei,ak7345
+       - asahi-kasei,ak7375
+ 
+diff --git a/drivers/media/i2c/ak7375.c b/drivers/media/i2c/ak7375.c
+index 9a2432cea..10ea98860 100644
+--- a/drivers/media/i2c/ak7375.c
++++ b/drivers/media/i2c/ak7375.c
+@@ -51,6 +51,20 @@ static const struct ak73xx_chipdef ak7345_cdef = {
+ 	.power_delay_us	= 20000,
+ };
+ 
++static const struct ak73xx_chipdef ak7314_cdef = {
++	.reg_position	= 0x0,
++	.reg_cont	= 0x2,
++	.shift_pos	= 6,	/* 10 bits position values, need to << 6 */
++	.mode_active	= 0x0,
++	.mode_standby	= 0x40,
++	.has_standby	= true,
++	.focus_pos_max	= 1023,
++	.focus_steps	= 1,
++	.ctrl_steps	= 16,
++	.ctrl_delay_us	= 1000,
++	.power_delay_us	= 2200,
++};
++
+ static const struct ak73xx_chipdef ak7375_cdef = {
+ 	.reg_position	= 0x0,
+ 	.reg_cont	= 0x2,
+@@ -329,6 +343,7 @@ static int __maybe_unused ak7375_vcm_resume(struct device *dev)
+ }
+ 
+ static const struct of_device_id ak7375_of_table[] = {
++	{ .compatible = "asahi-kasei,ak7314", .data = &ak7314_cdef, },
+ 	{ .compatible = "asahi-kasei,ak7345", .data = &ak7345_cdef, },
+ 	{ .compatible = "asahi-kasei,ak7375", .data = &ak7375_cdef, },
+ 	{ /* sentinel */ }
+-- 
+2.47.3
+

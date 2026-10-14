@@ -1,0 +1,4 @@
+# Xiaomi Diting: dma-buf memory for the libcamera software ISP (udmabuf)
+# for the video group, like the camera nodes themselves: the session
+# user's uaccess ACL arrives only after WirePlumber has started.
+KERNEL=="udmabuf", GROUP="video", MODE="0660"

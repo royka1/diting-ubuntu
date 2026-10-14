@@ -1,0 +1,197 @@
+From bdf1a49679ef4fdf6d9e103e637a51f25d711754 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 16:32:09 +0200
+Subject: [PATCH 63/64] regulator: Add Willsemi WL2866D camera LDO driver
+
+Four I2C controlled LDOs for camera modules: DVDD1/2 (0.6 V to 1.8 V in
+6 mV steps) and AVDD1/2 (1.2 V to 4.3 V in 12.5 mV steps), with the
+voltage codes at 0x03..0x06 and the output enables in 0x0e, as used by
+the vendor driver of the Xiaomi 12T Pro (output ranges from the Willsemi
+product data). The chip is enabled by its EN pin.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/regulator/Kconfig             |   8 ++
+ drivers/regulator/Makefile            |   1 +
+ drivers/regulator/wl2866d-regulator.c | 138 ++++++++++++++++++++++++++
+ 3 files changed, 147 insertions(+)
+ create mode 100644 drivers/regulator/wl2866d-regulator.c
+
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index a54a54919..f29cbbb9d 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -1851,6 +1851,14 @@ config REGULATOR_VQMMC_IPQ4019
+ 	  This driver provides support for the VQMMC LDO I/0
+ 	  voltage regulator of the IPQ4019 SD/EMMC controller.
+ 
++config REGULATOR_WL2866D
++	tristate "Willsemi WL2866D camera LDO"
++	depends on I2C && OF
++	select REGMAP_I2C
++	help
++	  Support for the Willsemi WL2866D, an I2C controlled four channel
++	  LDO (two DVDD, two AVDD) supplying camera sensors.
++
+ config REGULATOR_WM831X
+ 	tristate "Wolfson Microelectronics WM831x PMIC regulators"
+ 	depends on MFD_WM831X
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 134eee274..a7cb26d2d 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -211,6 +211,7 @@ obj-$(CONFIG_REGULATOR_RZG2L_VBCTRL) += renesas-usb-vbus-regulator.o
+ obj-$(CONFIG_REGULATOR_VCTRL) += vctrl-regulator.o
+ obj-$(CONFIG_REGULATOR_VEXPRESS) += vexpress-regulator.o
+ obj-$(CONFIG_REGULATOR_VQMMC_IPQ4019) += vqmmc-ipq4019-regulator.o
++obj-$(CONFIG_REGULATOR_WL2866D) += wl2866d-regulator.o
+ obj-$(CONFIG_REGULATOR_WM831X) += wm831x-dcdc.o
+ obj-$(CONFIG_REGULATOR_WM831X) += wm831x-isink.o
+ obj-$(CONFIG_REGULATOR_WM831X) += wm831x-ldo.o
+diff --git a/drivers/regulator/wl2866d-regulator.c b/drivers/regulator/wl2866d-regulator.c
+new file mode 100644
+index 000000000..6d622710f
+--- /dev/null
++++ b/drivers/regulator/wl2866d-regulator.c
+@@ -0,0 +1,138 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Willsemi WL2866D four channel camera LDO
++ *
++ * Two DVDD LDOs (0.6 V to 1.8 V in 6 mV steps, fed from VIN1) and two
++ * AVDD LDOs (1.2 V to 4.3 V in 12.5 mV steps, fed from VIN2), set over
++ * I2C. Register layout as used by the vendor driver of the Xiaomi 12T Pro:
++ * voltage codes at 0x03 (DVDD1), 0x04 (DVDD2), 0x05 (AVDD1), 0x06 (AVDD2),
++ * output enables in 0x0e (bit 0 DVDD1, 1 DVDD2, 2 AVDD1, 3 AVDD2). The
++ * chip itself is enabled by its EN pin.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++
++#define WL2866D_REG_DVDD1_VOUT		0x03
++#define WL2866D_REG_ENABLE		0x0e
++
++enum wl2866d_ldo {
++	WL2866D_DVDD1,
++	WL2866D_DVDD2,
++	WL2866D_AVDD1,
++	WL2866D_AVDD2,
++	WL2866D_NUM_LDOS,
++};
++
++static const struct regulator_ops wl2866d_ldo_ops = {
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++	.list_voltage = regulator_list_voltage_linear,
++	.map_voltage = regulator_map_voltage_linear,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++};
++
++#define WL2866D_LDO(_id, _name, _supply, _min, _step, _n)		\
++	[_id] = {							\
++		.name = _name,						\
++		.of_match = of_match_ptr(_name),			\
++		.regulators_node = of_match_ptr("regulators"),		\
++		.supply_name = _supply,					\
++		.id = _id,						\
++		.ops = &wl2866d_ldo_ops,				\
++		.type = REGULATOR_VOLTAGE,				\
++		.owner = THIS_MODULE,					\
++		.min_uV = _min,						\
++		.uV_step = _step,					\
++		.n_voltages = _n,					\
++		.vsel_reg = WL2866D_REG_DVDD1_VOUT + (_id),		\
++		.vsel_mask = 0xff,					\
++		.enable_reg = WL2866D_REG_ENABLE,			\
++		.enable_mask = BIT(_id),				\
++		.enable_time = 1000,					\
++	}
++
++static const struct regulator_desc wl2866d_ldos[WL2866D_NUM_LDOS] = {
++	WL2866D_LDO(WL2866D_DVDD1, "dvdd1", "vin1", 600000, 6000, 201),
++	WL2866D_LDO(WL2866D_DVDD2, "dvdd2", "vin1", 600000, 6000, 201),
++	WL2866D_LDO(WL2866D_AVDD1, "avdd1", "vin2", 1200000, 12500, 249),
++	WL2866D_LDO(WL2866D_AVDD2, "avdd2", "vin2", 1200000, 12500, 249),
++};
++
++static const struct regmap_config wl2866d_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = WL2866D_REG_ENABLE,
++};
++
++static int wl2866d_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct regulator_config config = { };
++	struct gpio_desc *enable_gpio;
++	struct regulator_dev *rdev;
++	struct regmap *regmap;
++	unsigned int val;
++	int i, ret;
++
++	regmap = devm_regmap_init_i2c(client, &wl2866d_regmap_config);
++	if (IS_ERR(regmap))
++		return dev_err_probe(dev, PTR_ERR(regmap), "failed to init regmap\n");
++
++	/* Chip enable: the outputs are switched individually over I2C */
++	enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH);
++	if (IS_ERR(enable_gpio))
++		return dev_err_probe(dev, PTR_ERR(enable_gpio),
++				     "failed to get enable GPIO\n");
++	if (enable_gpio)
++		usleep_range(1000, 2000);
++
++	ret = regmap_read(regmap, WL2866D_REG_ENABLE, &val);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to access the chip\n");
++
++	config.dev = dev;
++	config.regmap = regmap;
++
++	for (i = 0; i < WL2866D_NUM_LDOS; i++) {
++		rdev = devm_regulator_register(dev, &wl2866d_ldos[i], &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev),
++					     "failed to register %s\n",
++					     wl2866d_ldos[i].name);
++	}
++
++	return 0;
++}
++
++static const struct of_device_id wl2866d_of_match[] = {
++	{ .compatible = "willsemi,wl2866d" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, wl2866d_of_match);
++
++static const struct i2c_device_id wl2866d_id[] = {
++	{ "wl2866d" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, wl2866d_id);
++
++static struct i2c_driver wl2866d_driver = {
++	.driver = {
++		.name = "wl2866d-regulator",
++		.of_match_table = wl2866d_of_match,
++	},
++	.probe = wl2866d_probe,
++	.id_table = wl2866d_id,
++};
++module_i2c_driver(wl2866d_driver);
++
++MODULE_DESCRIPTION("Willsemi WL2866D camera LDO regulator driver");
++MODULE_LICENSE("GPL");
+-- 
+2.47.3
+

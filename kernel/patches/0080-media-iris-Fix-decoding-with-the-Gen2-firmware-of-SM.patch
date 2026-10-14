@@ -1,0 +1,264 @@
+From 0b1240f3de01ad01f8fdb8412cc796c7a133a9f4 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 22:30:05 +0200
+Subject: [PATCH 80/81] media: iris: Fix decoding with the Gen2 firmware of
+ SM8450
+
+The Gen2 firmware of the VPU 2.0 core (video-firmware 2.4, loaded on
+SM8450 and SM8475) differs from the SM8550 firmware in two ways that
+stop decoding:
+
+- It answers HFI_CMD_RESUME with a payload (HFI_CMD_SETTINGS_CHANGE or
+  HFI_CMD_DRAIN) with an information flag and does not resume. After
+  the first source change no frame is ever decoded. The vendor driver
+  (msm_vidc, waipio) sends the command without payload; with that the
+  firmware resumes.
+- It rejects the partial data buffer (HFI_BUFFER_PARTIAL_DATA), which
+  the vendor driver never allocates.
+
+Add a Gen2 firmware data variant for VPU 2.0 with these differences.
+The shared Gen2 initializers move into a macro so both variants stay
+in sync.
+
+Tested on the Xiaomi 12T Pro (SM8475): 1080p HEVC and H.264 streams
+decode bit-exactly (compared with ffmpeg) at about 165 frames/s.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../media/platform/qcom/iris/iris_hfi_gen2.c  | 133 ++++++++++--------
+ .../qcom/iris/iris_hfi_gen2_command.c         |  10 +-
+ .../platform/qcom/iris/iris_platform_common.h |   4 +
+ .../platform/qcom/iris/iris_platform_vpu2.c   |   2 +-
+ 4 files changed, 85 insertions(+), 64 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+index acc0ed8ad..2b593d423 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+@@ -1053,68 +1053,83 @@ static const u32 sm8550_enc_op_int_buf_tbl[] = {
+ 	BUF_SCRATCH_2,
+ };
+ 
+-const struct iris_firmware_data iris_hfi_gen2_data = {
+-	.init_hfi_ops = iris_hfi_gen2_sys_ops_init,
+-
+-	.core_arch = VIDEO_ARCH_LX,
+-
+-	.inst_fw_caps_dec = inst_fw_cap_sm8550_dec,
+-	.inst_fw_caps_dec_size = ARRAY_SIZE(inst_fw_cap_sm8550_dec),
+-	.inst_fw_caps_enc = inst_fw_cap_sm8550_enc,
+-	.inst_fw_caps_enc_size = ARRAY_SIZE(inst_fw_cap_sm8550_enc),
+-
+-	.dec_input_config_params_default =
+-		sm8550_vdec_input_config_params_default,
+-	.dec_input_config_params_default_size =
+-		ARRAY_SIZE(sm8550_vdec_input_config_params_default),
+-	.dec_input_config_params_hevc =
+-		sm8550_vdec_input_config_param_hevc,
+-	.dec_input_config_params_hevc_size =
+-		ARRAY_SIZE(sm8550_vdec_input_config_param_hevc),
+-	.dec_input_config_params_vp9 =
+-		sm8550_vdec_input_config_param_vp9,
+-	.dec_input_config_params_vp9_size =
+-		ARRAY_SIZE(sm8550_vdec_input_config_param_vp9),
+-	.dec_input_config_params_av1 =
+-		sm8550_vdec_input_config_param_av1,
+-	.dec_input_config_params_av1_size =
+-		ARRAY_SIZE(sm8550_vdec_input_config_param_av1),
+-	.dec_output_config_params =
+-		sm8550_vdec_output_config_params,
+-	.dec_output_config_params_size =
+-		ARRAY_SIZE(sm8550_vdec_output_config_params),
+-
+-	.enc_input_config_params =
+-		sm8550_venc_input_config_params,
+-	.enc_input_config_params_size =
+-		ARRAY_SIZE(sm8550_venc_input_config_params),
+-	.enc_output_config_params =
+-		sm8550_venc_output_config_params,
+-	.enc_output_config_params_size =
+-		ARRAY_SIZE(sm8550_venc_output_config_params),
++static const u32 sm8450_dec_ip_int_buf_tbl[] = {
++	BUF_BIN,
++	BUF_COMV,
++	BUF_NON_COMV,
++	BUF_LINE,
++};
+ 
+-	.dec_input_prop = sm8550_vdec_subscribe_input_properties,
+-	.dec_input_prop_size = ARRAY_SIZE(sm8550_vdec_subscribe_input_properties),
+-	.dec_output_prop_avc = sm8550_vdec_subscribe_output_properties_avc,
+-	.dec_output_prop_avc_size =
+-		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_avc),
+-	.dec_output_prop_hevc = sm8550_vdec_subscribe_output_properties_hevc,
+-	.dec_output_prop_hevc_size =
+-		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_hevc),
+-	.dec_output_prop_vp9 = sm8550_vdec_subscribe_output_properties_vp9,
+-	.dec_output_prop_vp9_size =
+-		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_vp9),
+-	.dec_output_prop_av1 = sm8550_vdec_subscribe_output_properties_av1,
+-	.dec_output_prop_av1_size =
+-		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_av1),
++#define IRIS_HFI_GEN2_COMMON_DATA \
++	.init_hfi_ops = iris_hfi_gen2_sys_ops_init, \
++	.core_arch = VIDEO_ARCH_LX, \
++	.inst_fw_caps_dec = inst_fw_cap_sm8550_dec, \
++	.inst_fw_caps_dec_size = ARRAY_SIZE(inst_fw_cap_sm8550_dec), \
++	.inst_fw_caps_enc = inst_fw_cap_sm8550_enc, \
++	.inst_fw_caps_enc_size = ARRAY_SIZE(inst_fw_cap_sm8550_enc), \
++	.dec_input_config_params_default = \
++		sm8550_vdec_input_config_params_default, \
++	.dec_input_config_params_default_size = \
++		ARRAY_SIZE(sm8550_vdec_input_config_params_default), \
++	.dec_input_config_params_hevc = \
++		sm8550_vdec_input_config_param_hevc, \
++	.dec_input_config_params_hevc_size = \
++		ARRAY_SIZE(sm8550_vdec_input_config_param_hevc), \
++	.dec_input_config_params_vp9 = \
++		sm8550_vdec_input_config_param_vp9, \
++	.dec_input_config_params_vp9_size = \
++		ARRAY_SIZE(sm8550_vdec_input_config_param_vp9), \
++	.dec_input_config_params_av1 = \
++		sm8550_vdec_input_config_param_av1, \
++	.dec_input_config_params_av1_size = \
++		ARRAY_SIZE(sm8550_vdec_input_config_param_av1), \
++	.dec_output_config_params = \
++		sm8550_vdec_output_config_params, \
++	.dec_output_config_params_size = \
++		ARRAY_SIZE(sm8550_vdec_output_config_params), \
++	.enc_input_config_params = \
++		sm8550_venc_input_config_params, \
++	.enc_input_config_params_size = \
++		ARRAY_SIZE(sm8550_venc_input_config_params), \
++	.enc_output_config_params = \
++		sm8550_venc_output_config_params, \
++	.enc_output_config_params_size = \
++		ARRAY_SIZE(sm8550_venc_output_config_params), \
++	.dec_input_prop = sm8550_vdec_subscribe_input_properties, \
++	.dec_input_prop_size = ARRAY_SIZE(sm8550_vdec_subscribe_input_properties), \
++	.dec_output_prop_avc = sm8550_vdec_subscribe_output_properties_avc, \
++	.dec_output_prop_avc_size = \
++		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_avc), \
++	.dec_output_prop_hevc = sm8550_vdec_subscribe_output_properties_hevc, \
++	.dec_output_prop_hevc_size = \
++		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_hevc), \
++	.dec_output_prop_vp9 = sm8550_vdec_subscribe_output_properties_vp9, \
++	.dec_output_prop_vp9_size = \
++		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_vp9), \
++	.dec_output_prop_av1 = sm8550_vdec_subscribe_output_properties_av1, \
++	.dec_output_prop_av1_size = \
++		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_av1), \
++	.dec_op_int_buf_tbl = sm8550_dec_op_int_buf_tbl, \
++	.dec_op_int_buf_tbl_size = ARRAY_SIZE(sm8550_dec_op_int_buf_tbl), \
++	.enc_ip_int_buf_tbl = sm8550_enc_ip_int_buf_tbl, \
++	.enc_ip_int_buf_tbl_size = ARRAY_SIZE(sm8550_enc_ip_int_buf_tbl), \
++	.enc_op_int_buf_tbl = sm8550_enc_op_int_buf_tbl, \
++	.enc_op_int_buf_tbl_size = ARRAY_SIZE(sm8550_enc_op_int_buf_tbl)
+ 
++const struct iris_firmware_data iris_hfi_gen2_data = {
++	IRIS_HFI_GEN2_COMMON_DATA,
+ 	.dec_ip_int_buf_tbl = sm8550_dec_ip_int_buf_tbl,
+ 	.dec_ip_int_buf_tbl_size = ARRAY_SIZE(sm8550_dec_ip_int_buf_tbl),
+-	.dec_op_int_buf_tbl = sm8550_dec_op_int_buf_tbl,
+-	.dec_op_int_buf_tbl_size = ARRAY_SIZE(sm8550_dec_op_int_buf_tbl),
++};
+ 
+-	.enc_ip_int_buf_tbl = sm8550_enc_ip_int_buf_tbl,
+-	.enc_ip_int_buf_tbl_size = ARRAY_SIZE(sm8550_enc_ip_int_buf_tbl),
+-	.enc_op_int_buf_tbl = sm8550_enc_op_int_buf_tbl,
+-	.enc_op_int_buf_tbl_size = ARRAY_SIZE(sm8550_enc_op_int_buf_tbl),
++/*
++ * Gen2 firmware of the VPU 2.0 core (SM8450, SM8475): no partial data
++ * buffer, and HFI_CMD_RESUME is sent without a payload, as the vendor
++ * driver does. With a payload the firmware does not resume decoding.
++ */
++const struct iris_firmware_data iris_hfi_gen2_vpu2_data = {
++	IRIS_HFI_GEN2_COMMON_DATA,
++	.dec_ip_int_buf_tbl = sm8450_dec_ip_int_buf_tbl,
++	.dec_ip_int_buf_tbl_size = ARRAY_SIZE(sm8450_dec_ip_int_buf_tbl),
++	.resume_without_payload = true,
+ };
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+index ee2730c29..919a167c7 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+@@ -1178,6 +1178,7 @@ static int iris_hfi_gen2_session_pause(struct iris_inst *inst, u32 plane)
+ static int iris_hfi_gen2_session_resume_drc(struct iris_inst *inst, u32 plane)
+ {
+ 	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	bool no_payload = inst->core->iris_firmware_data->resume_without_payload;
+ 	u32 payload = HFI_CMD_SETTINGS_CHANGE;
+ 
+ 	iris_hfi_gen2_packet_session_command(inst,
+@@ -1186,9 +1187,9 @@ static int iris_hfi_gen2_session_resume_drc(struct iris_inst *inst, u32 plane)
+ 					     HFI_HOST_FLAGS_INTR_REQUIRED),
+ 					     iris_hfi_gen2_get_port(inst, plane),
+ 					     inst->session_id,
+-					     HFI_PAYLOAD_U32,
++					     no_payload ? HFI_PAYLOAD_NONE : HFI_PAYLOAD_U32,
+ 					     &payload,
+-					     sizeof(u32));
++					     no_payload ? 0 : sizeof(u32));
+ 
+ 	return iris_hfi_queue_cmd_write(inst->core, inst_hfi_gen2->packet,
+ 					inst_hfi_gen2->packet->size);
+@@ -1197,6 +1198,7 @@ static int iris_hfi_gen2_session_resume_drc(struct iris_inst *inst, u32 plane)
+ static int iris_hfi_gen2_session_resume_drain(struct iris_inst *inst, u32 plane)
+ {
+ 	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	bool no_payload = inst->core->iris_firmware_data->resume_without_payload;
+ 	u32 payload = HFI_CMD_DRAIN;
+ 
+ 	iris_hfi_gen2_packet_session_command(inst,
+@@ -1205,9 +1207,9 @@ static int iris_hfi_gen2_session_resume_drain(struct iris_inst *inst, u32 plane)
+ 					     HFI_HOST_FLAGS_INTR_REQUIRED),
+ 					     iris_hfi_gen2_get_port(inst, plane),
+ 					     inst->session_id,
+-					     HFI_PAYLOAD_U32,
++					     no_payload ? HFI_PAYLOAD_NONE : HFI_PAYLOAD_U32,
+ 					     &payload,
+-					     sizeof(u32));
++					     no_payload ? 0 : sizeof(u32));
+ 
+ 	return iris_hfi_queue_cmd_write(inst->core, inst_hfi_gen2->packet,
+ 					inst_hfi_gen2->packet->size);
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index 0e070a0e1..cb0aea7c0 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -52,6 +52,7 @@ enum pipe_type {
+ 
+ extern const struct iris_firmware_data iris_hfi_gen1_data;
+ extern const struct iris_firmware_data iris_hfi_gen2_data;
++extern const struct iris_firmware_data iris_hfi_gen2_vpu2_data;
+ 
+ extern const struct iris_platform_data qcs8300_data;
+ extern const struct iris_platform_data sc7280_data;
+@@ -280,6 +281,9 @@ struct iris_firmware_data {
+ 	unsigned int enc_ip_int_buf_tbl_size;
+ 	const u32 *enc_op_int_buf_tbl;
+ 	unsigned int enc_op_int_buf_tbl_size;
++
++	/* HFI_CMD_RESUME without payload (Gen2 firmware of VPU 2.0 SoCs) */
++	bool resume_without_payload;
+ };
+ 
+ struct iris_firmware_desc {
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+index 8137365b8..8398a7666 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+@@ -29,7 +29,7 @@ static const struct iris_firmware_desc iris_vpu20_p4_gen1_desc = {
+ };
+ 
+ static const struct iris_firmware_desc iris_vpu20_p4_gen2_desc = {
+-	.firmware_data = &iris_hfi_gen2_data,
++	.firmware_data = &iris_hfi_gen2_vpu2_data,
+ 	.get_vpu_buffer_size = iris_vpu_buf_size,
+ 	.fwname = "qcom/vpu/vpu20_p4_gen2.mbn",
+ };
+-- 
+2.47.3
+

@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 09:46:23 +0200
+Subject: [PATCH 14/46] arm64: dts: qcom: sm8475-xiaomi-diting: Enable the GPU
+
+The zap shader is signed for the device and comes from its vendor
+firmware partition.
+---
+ arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index d2fb34d5d..9967ca673 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -485,6 +485,14 @@ eusb2_repeater: redriver@4f {
+ 	};
+ };
+ 
++&gpu {
++	status = "okay";
++
++	zap-shader {
++		firmware-name = "qcom/sm8475/xiaomi/diting/a730_zap.mbn";
++	};
++};
++
+ &mdss {
+ 	status = "okay";
+ };

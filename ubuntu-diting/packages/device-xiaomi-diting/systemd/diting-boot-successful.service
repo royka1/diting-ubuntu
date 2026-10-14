@@ -1,0 +1,14 @@
+[Unit]
+Description=Mark the running A/B slot as successfully booted (Qualcomm ABL)
+Documentation=file:///usr/share/doc/device-xiaomi-diting
+# Without this, ABL counts down the slot's retries on every boot and marks
+# it unbootable after 7 boots (Android does this via its boot control HAL).
+After=multi-user.target
+ConditionPathExists=/dev/disk/by-partlabel/boot_b
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/diting/diting-mark-boot-successful
+
+[Install]
+WantedBy=multi-user.target

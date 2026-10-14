@@ -1,0 +1,18 @@
+#!/bin/sh
+# Stop the diting-debug helpers (USB shell, dmesg->pstore copier) before the
+# switch to the real root: run-init deletes the initramfs binaries they use.
+# After the switch, diting-usb-gadget.service and SSH take over.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+
+[ -e /run/diting-debug.pids ] || exit 0
+: > /run/diting-debug.stop
+for pid in $(cat /run/diting-debug.pids /run/diting-debug-shell.pid 2>/dev/null); do
+	kill "$pid" 2>/dev/null || true
+done
+rm -f /run/diting-debug.pids /run/diting-debug-shell.pid
+# Hand usb0 over unconfigured: NetworkManager adopts a pre-set address as an
+# "external" connection instead of activating the diting-usb0 profile.
+ip addr flush dev usb0 2>/dev/null || true
+exit 0

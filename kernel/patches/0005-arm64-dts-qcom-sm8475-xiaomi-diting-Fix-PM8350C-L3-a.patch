@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 23:16:41 +0200
+Subject: [PATCH 05/46] arm64: dts: qcom: sm8475-xiaomi-diting: Fix PM8350C L3
+ and PM8450 L4
+
+Found on the first boot of the device (console photo, 2026-10-11):
+- vreg_l3c_3p3: 3.300 V is not a valid step of this PMIC5 PLDO
+  (1.504 V + n * 8 mV), so the whole PM8350C regulator device failed to
+  probe, which left the UFS and eUSB2 PHYs without L10C.
+- PM8450 ldo4: 'could not find RPMh address for resource ldoh4'; the
+  regulator is not in this unit's command DB.
+
+Local Diting bring-up patch, not submitted upstream.
+---
+ .../arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts | 16 +++++++---------
+ 1 file changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 4809aab0f..e77871ab1 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -240,11 +240,14 @@ vreg_l2c_1p8: ldo2 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
+-		/* always-on and boot-on in the vendor DT */
++		/*
++		 * always-on and boot-on in the vendor DT, which asks for 3.3 V;
++		 * this PLDO only has 3.296/3.304 V steps around it.
++		 */
+ 		vreg_l3c_3p3: ldo3 {
+ 			regulator-name = "vreg_l3c_3p3";
+-			regulator-min-microvolt = <3300000>;
+-			regulator-max-microvolt = <3300000>;
++			regulator-min-microvolt = <3296000>;
++			regulator-max-microvolt = <3304000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 			regulator-boot-on;
+ 			regulator-always-on;
+@@ -345,12 +348,7 @@ vreg_l3h_0p87: ldo3 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
+-		vreg_l4h_1p8: ldo4 {
+-			regulator-name = "vreg_l4h_1p8";
+-			regulator-min-microvolt = <1800000>;
+-			regulator-max-microvolt = <1808000>;
+-			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+-		};
++		/* ldo4: listed in the vendor DT, but absent from this unit's cmd-db */
+ 	};
+ 
+ 	regulators-3 {

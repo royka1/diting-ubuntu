@@ -1,0 +1,269 @@
+#!/bin/bash
+# Build the firmware-xiaomi-diting package from a Xiaomi 12T Pro's own
+# firmware: device-signed blobs that no distribution can ship. Used on the
+# build host (from the tar backups of collect-android.sh) and on the phone
+# itself (diting-firmware-setup, from the Android partitions).
+#
+#   diting-build-firmware OUTDIR
+#
+# Source, one of:
+#   FW_TREE=DIR  a tree with the Android paths (vendor/firmware, vendor/etc,
+#                vendor/firmware_mnt, vendor/bt_firmware, vendor/dsp,
+#                mnt/vendor/persist, vendor/lib64/camera)
+#   FW_SRC=DIR   the tar files of collect-android.sh (vendor_firmware.tar, ...)
+#                and CAM_SRC=DIR with the camera sensor modules
+# Tools (defaults: the source tree layout next to this script):
+#   DITING_TOOLS  directory with mdt-squash.py, camera/, acdb/
+#   ART_DIR       audioreach-topology checkout, ATOP_DIR packages/audio-topology
+#   ACDB_QUERY    acdb-query binary (tools/acdb/build.sh)
+# Options: FIRMWARE_PKG_VERSION, FIRMWARE_MTIME (date for file times)
+#
+# Distributable firmware comes from Ubuntu (linux-firmware-qualcomm-*), which
+# the package depends on. The resulting .deb must never be redistributed.
+set -euo pipefail
+
+log()  { printf '==> %s\n' "$*" >&2; }
+warn() { printf 'WARN: %s\n' "$*" >&2; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+OUTDIR="${1:?usage: diting-build-firmware OUTDIR}"
+here="$(cd "$(dirname "$0")" && pwd)"
+DITING_TOOLS="${DITING_TOOLS:-$(cd "$here/.." && pwd)}"
+ART_DIR="${ART_DIR:-$DITING_TOOLS/../references/audioreach-topology}"
+ATOP_DIR="${ATOP_DIR:-$DITING_TOOLS/../ubuntu-diting/packages/audio-topology}"
+FW_TREE="${FW_TREE:-}"
+FW_SRC="${FW_SRC:-}"
+if [ -n "$FW_TREE" ]; then
+	CAM_SRC="${CAM_SRC:-$FW_TREE/vendor/lib64/camera}"
+else
+	[ -n "$FW_SRC" ] || die "set FW_TREE or FW_SRC"
+	CAM_SRC="${CAM_SRC:-}"
+fi
+for t in dpkg-deb sha256sum tar python3 m4 alsatplg; do
+	command -v "$t" >/dev/null || die "missing tool: $t"
+done
+[ -x "${ACDB_QUERY:-}" ] || die "ACDB_QUERY must point to the acdb-query binary"
+
+PKG=firmware-xiaomi-diting
+PKG_VERSION="${FIRMWARE_PKG_VERSION:-0.9.2}"
+FW=usr/lib/firmware
+DIT=qcom/sm8475/xiaomi/diting
+
+# <tar in FW_SRC>:<path or glob in tar>:<target under /usr/lib/firmware>
+# (a target ending in / is a directory and keeps the file names)
+BLOBS=(
+	# GPU zap shader, signed for this device (vendor partition)
+	"vendor_firmware.tar:vendor/firmware/a730_zap.mbn:$DIT/a730_zap.mbn"
+	# Video codec (IRIS2, Gen2 HFI) firmware, PAS 9; Android loads this .mbn
+	"vendor_firmware.tar:vendor/firmware/vpu20_4v.mbn:$DIT/vpu20_4v.mbn"
+	# Bluetooth rampatch + NVM for the QCA6490 ROM 2.1 (bt_firmware partition);
+	# referenced by firmware-name in the DT, hci_qca appends the board id
+	"vendor_bt_firmware.tar:vendor/bt_firmware/image/hpbtfw21.tlv:qca/diting/hpbtfw21.tlv"
+	"vendor_bt_firmware.tar:vendor/bt_firmware/image/hpnv21*:qca/diting/"
+	# CS35L41 speaker protection DSP firmware + per-amp tuning (B=bottom, T=top);
+	# names as wm_adsp requests them for subsystem "diting"
+	"vendor_firmware.tar:vendor/firmware/cs35l41-dsp1-spk-prot.wmfw:cirrus/cs35l41-dsp1-spk-prot-diting.wmfw"
+	"vendor_firmware.tar:vendor/firmware/B-cs35l41-dsp1-spk-prot.bin:cirrus/cs35l41-dsp1-spk-prot-diting-b.bin"
+	"vendor_firmware.tar:vendor/firmware/T-cs35l41-dsp1-spk-prot.bin:cirrus/cs35l41-dsp1-spk-prot-diting-t.bin"
+	# Wi-Fi board data. INFERRED: hwc "GL" + project "l12" -> bd_l12gl.elf.
+	# ath11k accepts the ELF as board.bin; updates/ keeps it apart from
+	# Ubuntu's linux-firmware-qualcomm-wireless.
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/bd_l12gl.elf:updates/ath11k/WCN6855/hw2.0/board.bin"
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/qca6490/bd_l12gl.elf:updates/ath11k/WCN6855/hw2.1/board.bin"
+)
+# Split images, combined with mdt-squash.py: <tar>:<path of .mdt>:<target>
+SQUASH=(
+	# Audio DSP (also runs the battery/charger firmware), firmware_mnt partition
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/adsp.mdt:$DIT/adsp.mbn"
+	# Modem (MPSS); tqftpserv serves modem_pr/ from next to it
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/modem.mdt:$DIT/modem.mbn"
+	# IPA GSI firmware (mobile data path), loaded by the ipa driver (PAS 15)
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/ipa_fws.mdt:$DIT/ipa_fws.mbn"
+	# Sensor DSP (SLPI), firmware_mnt partition
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/slpi.mdt:$DIT/slpi.mbn"
+)
+# Directory trees copied as they are: <tar>:<dir in tar>:<target dir>
+TREES=(
+	# Modem configuration (carrier MBNs, mcfg), read by the modem via tqftpserv
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/modem_pr:$DIT/modem_pr"
+)
+# Trees outside /usr/lib/firmware: <tar>:<dir in tar>:<target dir from />
+SHARE_TREES=(
+	# ADSP dynamic modules (Fluence ECNS etc.), loaded by the audio PD
+	# through adsprpcd (ADSP_LIBRARY_PATH, see diting-audiopd.service)
+	"vendor_dsp.tar:vendor/dsp/adsp:usr/share/qcom/sm8475/Xiaomi/diting/dsp/adsp"
+	# factory speaker calibration of this unit (CS35L41 protection firmware,
+	# calibrated resistance per amplifier), see diting-speaker-protection
+	"mnt_vendor_persist.tar:mnt/vendor/persist/audio:usr/share/qcom/sm8475/Xiaomi/diting/audio"
+	# Sensors, served to the SLPI by hexagonrpcd (-R /usr/share/qcom/sm8475/Xiaomi/diting):
+	# its dynamic modules, the sensor configuration and the factory
+	# sensor registry (calibration); see diting-sensors.service
+	"vendor_dsp.tar:vendor/dsp/sdsp:usr/share/qcom/sm8475/Xiaomi/diting/dsp/sdsp"
+	"vendor_etc.tar:vendor/etc/sensors/config:usr/share/qcom/sm8475/Xiaomi/diting/sensors/config"
+	"mnt_vendor_persist.tar:mnt/vendor/persist/sensors/registry/registry:usr/share/qcom/sm8475/Xiaomi/diting/sensors/registry.factory"
+)
+# Single files outside /usr/lib/firmware: <tar>:<file in tar>:<target from />
+SHARE_FILES=(
+	"vendor_etc.tar:vendor/etc/sensors/sns_reg_config:usr/share/qcom/sm8475/Xiaomi/diting/sensors/sns_reg.conf"
+	"mnt_vendor_persist.tar:mnt/vendor/persist/sensors/registry/sns_reg_version:usr/share/qcom/sm8475/Xiaomi/diting/sensors/sns_reg_version.factory"
+)
+# Trees whose vendor modification times are kept (see below)
+KEEP_MTIME=(
+	"vendor_etc.tar:vendor/etc/sensors/config:usr/share/qcom/sm8475/Xiaomi/diting/sensors/config"
+)
+# The SLPI updates its registry (persist/sensors/registry on Android:
+# registry/, sns_reg_version, temp.json): hexagonrpcd serves sensors/persist
+# writable from /var/lib (seeded from the factory copy by diting-sensors.service)
+SHARE_LINKS=(
+	"/var/lib/diting-sensors:usr/share/qcom/sm8475/Xiaomi/diting/sensors/persist"
+	# SoC identification (/sys/devices/soc0 on Android)
+	"/sys/devices/soc0:usr/share/qcom/sm8475/Xiaomi/diting/socinfo"
+)
+# Camera sensor register tables ("camregs", loaded by the sensor drivers),
+# converted from the CamX sensor modules of the vendor partition
+CAMREGS=(
+	"com.qti.sensormodule.diting_sunny_s5k4h7_ultra.bin:s5k4h7-ultra.camregs"
+	"com.qti.sensormodule.diting_semco_s5khp1_wide.bin:s5khp1-wide.camregs"
+)
+
+work="$(mktemp -d)"
+# vendor trees carry read-only directory modes; make them removable first
+trap 'chmod -R u+rwX "$work" 2>/dev/null; rm -rf "$work"' EXIT
+bld="$work/pkg"
+tmp="$work/extract"
+mkdir -p "$bld/DEBIAN" "$bld/$FW" "$bld/usr/share/doc/$PKG"
+
+manifest="$bld/usr/share/doc/$PKG/MANIFEST"
+echo "# file sha256 source" > "$manifest"
+fresh_tmp() { [ ! -d "$tmp" ] || chmod -R u+rwX "$tmp"; rm -rf "$tmp"; mkdir -p "$tmp"; }
+# fetch <tarball> <path or glob>: copy it (with its path) from the source into $tmp
+fetch() {
+	if [ -n "$FW_TREE" ]; then
+		# shellcheck disable=SC2086 # the pattern is a glob on purpose
+		(cd "$FW_TREE" && shopt -s nullglob && set -- $2 && [ $# -gt 0 ] &&
+			cp -a --parents "$@" "$tmp/") || die "$2 not found in $FW_TREE"
+	else
+		[ -f "$FW_SRC/$1" ] || die "missing $FW_SRC/$1"
+		tar -xf "$FW_SRC/$1" -C "$tmp" --wildcards "$2" || die "$2 not found in $1"
+	fi
+}
+source_of() { if [ -n "$FW_TREE" ]; then echo "$2"; else echo "$1:$2"; fi; }
+add() {	# add <file> <target> <source description>
+	mkdir -p "$(dirname "$bld/$FW/$2")"
+	cp "$1" "$bld/$FW/$2"
+	echo "$FW/$2 $(sha256_of "$bld/$FW/$2") $3" >> "$manifest"
+}
+for b in "${BLOBS[@]}"; do
+	IFS=: read -r tarball member target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "$member"
+	for f in $tmp/$member; do
+		case "$target" in
+		*/) add "$f" "$target$(basename "$f")" "$(source_of "$tarball" "${f#"$tmp"/}")" ;;
+		*) add "$f" "$target" "$(source_of "$tarball" "${f#"$tmp"/}")" ;;
+		esac
+	done
+done
+for b in "${SQUASH[@]}"; do
+	IFS=: read -r tarball mdt target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "${mdt%.mdt}.*"
+	python3 -I -B "$DITING_TOOLS/mdt-squash.py" "$tmp/$mdt" "$tmp/squashed" >/dev/null
+	add "$tmp/squashed" "$target" "$(source_of "$tarball" "${mdt%.mdt}.{mdt,bNN}") (squashed)"
+done
+for b in "${TREES[@]}"; do
+	IFS=: read -r tarball dir target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "$dir"
+	(cd "$tmp/$dir" && find . -type f | LC_ALL=C sort) | while read -r f; do
+		add "$tmp/$dir/$f" "$target/${f#./}" "$(source_of "$tarball" "$dir/${f#./}")"
+	done
+done
+for b in "${SHARE_TREES[@]}"; do
+	IFS=: read -r tarball dir target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "$dir"
+	(cd "$tmp/$dir" && find . -type f | LC_ALL=C sort) | while read -r f; do
+		mkdir -p "$(dirname "$bld/$target/${f#./}")"
+		cp "$tmp/$dir/$f" "$bld/$target/${f#./}"
+		echo "$target/${f#./} $(sha256_of "$bld/$target/${f#./}") $(source_of "$tarball" "$dir/${f#./}")" >> "$manifest"
+	done
+done
+for b in "${SHARE_FILES[@]}"; do
+	IFS=: read -r tarball member target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "$member"
+	mkdir -p "$(dirname "$bld/$target")"
+	cp "$tmp/$member" "$bld/$target"
+	echo "$target $(sha256_of "$bld/$target") $(source_of "$tarball" "$member")" >> "$manifest"
+done
+for b in "${SHARE_LINKS[@]}"; do
+	IFS=: read -r dest target <<<"$b"
+	mkdir -p "$(dirname "$bld/$target")"
+	ln -sfn "$dest" "$bld/$target"
+done
+
+for c in "${CAMREGS[@]}"; do
+	IFS=: read -r module out <<<"$c"
+	if [ -z "$CAM_SRC" ] || [ ! -f "$CAM_SRC/$module" ]; then
+		warn "no $module: no $out (this camera stays off)"
+		continue
+	fi
+	fresh_tmp
+	python3 -I -B "$DITING_TOOLS/camera/chromatix-to-camregs.py" "$CAM_SRC/$module" "$tmp/$out" >/dev/null ||
+		die "converting $module failed"
+	add "$tmp/$out" "$DIT/$out" "vendor:lib64/camera/$module (chromatix-to-camregs.py)"
+done
+
+# Voice call topology: the open speaker/mic topology plus the vendor voice
+# call graph and its calibration from the phone's ACDB. In updates/, which
+# the firmware loader prefers over device-xiaomi-diting's topology without a
+# file conflict.
+fresh_tmp
+fetch vendor_etc.tar vendor/etc/acdbdata/ukee_mtp
+tplg=updates/qcom/sm8450/XIAOMI-DITING-tplg.bin
+mkdir -p "$bld/$FW/$(dirname "$tplg")"
+ACDB_DIR="$tmp/vendor/etc/acdbdata/ukee_mtp" ART_DIR="$ART_DIR" ATOP_DIR="$ATOP_DIR" \
+	bash "$DITING_TOOLS/acdb/build-voice-tplg.sh" "$bld/$FW/$tplg" > "$work/voice-tplg.log" 2>&1 ||
+	{ cat "$work/voice-tplg.log" >&2; die "voice topology build failed"; }
+[ -s "$bld/$FW/$tplg" ] || { cat "$work/voice-tplg.log" >&2; die "voice topology build failed"; }
+echo "$FW/$tplg $(sha256_of "$bld/$FW/$tplg") $(source_of vendor_etc.tar vendor/etc/acdbdata/ukee_mtp) (build-voice-tplg.sh)" >> "$manifest"
+
+cat > "$bld/DEBIAN/control" <<C
+Package: $PKG
+Version: $PKG_VERSION
+Architecture: all
+Maintainer: ubuntu-diting local build <ubuntu-diting@localhost>
+Depends: linux-firmware-qualcomm-graphics, linux-firmware-qualcomm-wireless
+Section: non-free-firmware/kernel
+Priority: optional
+Description: Xiaomi 12T Pro (diting) device-signed firmware (local build)
+ Firmware extracted from the phone's own Android partitions that is signed
+ for this device and therefore not part of linux-firmware: GPU zap shader,
+ ADSP, Bluetooth NVM/rampatch, Wi-Fi board data, speaker amplifier tuning,
+ modem and IPA firmware and carrier configuration, the ADSP's dynamic
+ audio modules, the voice call topology built from the device's ACDB, the
+ factory speaker calibration, and the sensor DSP firmware, modules,
+ configuration and factory sensor registry.
+ Not redistributable; built locally on or for one phone.
+C
+
+chmod -R u=rwX,go=rX "$bld"
+find "$bld" -exec touch -h -d "${FIRMWARE_MTIME:-2026-01-01 00:00:00 UTC}" {} +
+# The sensor registry records each config file's modification time and
+# re-parses (and rewrites the registry for) every file whose time differs
+# from the factory registry, which crashes the SLPI: keep the vendor times.
+for b in "${KEEP_MTIME[@]}"; do
+	IFS=: read -r tarball dir target <<<"$b"
+	fresh_tmp
+	fetch "$tarball" "$dir"
+	(cd "$tmp/$dir" && find . -type f) | while read -r f; do
+		touch -h -r "$tmp/$dir/$f" "$bld/$target/${f#./}"
+	done
+	touch -h -r "$tmp/$dir" "$bld/$target"
+done
+mkdir -p "$OUTDIR"
+deb="$OUTDIR/${PKG}_${PKG_VERSION}_all.deb"
+dpkg-deb --root-owner-group -Zxz --build "$bld" "$deb" >/dev/null
+log "wrote $deb ($(($(wc -l < "$manifest") - 1)) files; contains device firmware, do not redistribute)"

@@ -1,0 +1,28 @@
+Source: libva-v4l2-stateful
+Section: libs
+Priority: optional
+Maintainer: royka1 <397414+royka1@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               meson (>= 0.58.0),
+               pkgconf,
+               libva-dev (>= 1.8.0),
+               libdrm-dev (>= 2.4.60),
+               libgbm-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/sky1-linux/libva-v4l2-stateful
+Rules-Requires-Root: no
+
+Package: libva-v4l2-stateful
+Architecture: arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: VA-API driver for V4L2 stateful video decoders (Diting iris)
+ VA-API backend on top of V4L2 stateful (memory-to-memory) decoders,
+ patched for the Qualcomm iris decoder of the Xiaomi 12T Pro (diting):
+ H.264, HEVC and VP9 hardware decoding for VA-API applications.
+ .
+ Also installed as msm_drv_video.so, the name libva derives from the msm
+ DRM driver, so applications use it without LIBVA_DRIVER_NAME.
+ .
+ Firefox works directly. Snap Chromium cannot read host libraries: a
+ systemd user service copies the driver into ~/snap/chromium/common/dri
+ at login (see diting-chromium-vaapi).

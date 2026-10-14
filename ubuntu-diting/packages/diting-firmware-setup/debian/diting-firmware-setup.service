@@ -1,0 +1,21 @@
+[Unit]
+Description=Extract the phone's own firmware (first boot)
+Documentation=man:diting-firmware-setup(8) https://github.com/royka1/diting-ubuntu
+# once: until the package is installed, or after a failed attempt
+ConditionPathExists=!/usr/share/doc/firmware-xiaomi-diting/MANIFEST
+ConditionPathExists=!/var/lib/diting-firmware-setup/failed
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=display-manager.service greetd.service
+DefaultDependencies=no
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/sbin/diting-firmware-setup --reboot || { mkdir -p /var/lib/diting-firmware-setup; touch /var/lib/diting-firmware-setup/failed; exit 1; }'
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

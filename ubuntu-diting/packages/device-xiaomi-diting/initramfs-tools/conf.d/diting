@@ -1,0 +1,6 @@
+# Xiaomi Diting: UFS, PHYs and USB are built into the kernel, so a small
+# initramfs with only the listed modules is enough and keeps vendor_boot
+# within its 96 MiB partition.
+MODULES=list
+COMPRESS=zstd
+BUSYBOX=y

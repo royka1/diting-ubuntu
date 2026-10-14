@@ -1,0 +1,29 @@
+Source: device-xiaomi-diting
+Section: kernel
+Priority: optional
+Maintainer: ubuntu-diting local build <ubuntu-diting@localhost>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: device-xiaomi-diting
+Architecture: all
+Depends: ${misc:Depends}, initramfs-tools, mkbootimg, device-tree-compiler, iproute2, python3,
+ python3-gi, alsa-utils
+Recommends: linux-image-7.2.10-diting, fastrpc-diting, hexagonrpcd-diting, firmware-xiaomi-diting, modemmanager
+Description: Xiaomi 12T Pro / Redmi K50 Ultra (diting) device support
+ Device integration for running Ubuntu on the Xiaomi Diting (SM8475):
+  - diting-mkbootimg: builds Android boot v4 boot.img/vendor_boot.img from
+    the installed kernel, initramfs and DTB into /boot/diting (never flashes)
+  - kernel postinst and initramfs post-update hooks calling it
+  - initramfs-tools configuration and an opt-in USB debug mode
+  - a USB gadget service (NCM network + ACM serial)
+  - an APT pin that keeps Ubuntu's generic kernel from being installed
+  - voice call audio: diting-voice-call starts the AudioReach voice graphs
+    while ModemManager has a call; diting-audiopd runs the ADSP audio PD
+    (adsprpcd, fastrpc-diting) for the call's echo/noise cancellation
+    (topology and DSP modules from the local firmware-xiaomi-diting)
+  - sensors: diting-sensors runs hexagonrpcd (hexagonrpcd-diting) for the
+    sensor DSP when it comes up
+ .
+ Experimental, local bring-up package.

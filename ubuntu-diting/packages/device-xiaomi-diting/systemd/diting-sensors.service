@@ -1,0 +1,35 @@
+[Unit]
+Description=Sensor DSP file server (hexagonrpcd) for the Xiaomi Diting
+Documentation=https://github.com/linux-msm/hexagonrpc
+# Started by udev when the SLPI's FastRPC device appears. hexagonrpcd
+# attaches the sensors PD and serves its registry, sensor configuration and
+# dynamic modules from firmware-xiaomi-diting.
+ConditionPathExists=/dev/fastrpc-sdsp
+ConditionPathExists=/usr/bin/hexagonrpcd
+ConditionPathIsDirectory=/usr/share/qcom/sm8475/Xiaomi/diting/dsp/sdsp
+
+[Service]
+Type=simple
+# the registry served from /var/lib, seeded from the factory copy
+ExecStartPre=/usr/bin/systemd-tmpfiles --create diting-sensors.conf
+ExecStart=/usr/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom/sm8475/Xiaomi/diting
+Restart=on-failure
+RestartSec=3
+StateDirectory=diting-sensors
+# hardening as Ubuntu's hexagonrpcd.service (which hexagonrpcd-diting replaces)
+NoNewPrivileges=yes
+PrivateTmp=yes
+DevicePolicy=closed
+DeviceAllow=/dev/fastrpc-sdsp rw
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes

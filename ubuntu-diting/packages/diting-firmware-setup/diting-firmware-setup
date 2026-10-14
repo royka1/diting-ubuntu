@@ -1,0 +1,82 @@
+#!/bin/bash
+# Build and install firmware-xiaomi-diting from this phone's own Android
+# partitions. Xiaomi/Qualcomm firmware is signed for the device and may not
+# be redistributed, so the Ubuntu image ships without it and every phone
+# extracts its own copy (run once at first boot by diting-firmware-setup.service).
+#
+#   diting-firmware-setup [--build-only DIR] [--slot a|b] [--reboot]
+#
+# Everything is read-only: modem_<slot>, bluetooth_<slot> and dsp_<slot>
+# are mounted read-only (ext4 with noload, no journal replay), persist the
+# same way, and vendor_<slot> inside super is mapped with a read-only
+# device-mapper table and read with fsck.erofs. Nothing on the Android
+# partitions is written. The slot defaults to the one that booted.
+set -euo pipefail
+
+LIB="${DITING_FW_LIB:-/usr/lib/diting-firmware-setup}"
+STATE=/var/lib/diting-firmware-setup
+DM=diting-fw-vendor
+slot=""
+build_only=""
+reboot=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--build-only) build_only="$2"; shift 2 ;;
+	--slot) slot="$2"; shift 2 ;;
+	--reboot) reboot=1; shift ;;
+	*) echo "usage: $0 [--build-only DIR] [--slot a|b] [--reboot]" >&2; exit 2 ;;
+	esac
+done
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+say() { echo "diting-firmware-setup: $*"; }
+
+[ -n "$slot" ] || slot="$(/usr/lib/diting/diting-mark-boot-successful --print-slot)"
+case "$slot" in a|b) ;; *) say "cannot determine the active slot"; exit 1 ;; esac
+part() { readlink -e "/dev/disk/by-partlabel/$1" || { say "no partition $1"; exit 1; }; }
+
+work="$(mktemp -d /var/tmp/diting-firmware.XXXXXX)"
+tree="$work/tree"
+cleanup() {
+	for m in "$tree/vendor/firmware_mnt" "$tree/vendor/bt_firmware" "$tree/vendor/dsp" "$tree/mnt/vendor/persist"; do
+		mountpoint -q "$m" && umount "$m"
+	done
+	[ ! -e "/dev/mapper/$DM" ] || dmsetup remove "$DM"
+	chmod -R u+rwX "$work" 2>/dev/null || true
+	rm -rf "$work"
+}
+trap cleanup EXIT
+
+say "reading the firmware of Android slot $slot (read-only)"
+mkdir -p "$tree/vendor/firmware_mnt" "$tree/vendor/bt_firmware" "$tree/vendor/dsp" "$tree/mnt/vendor/persist"
+# Android mounts the FAT partitions with shortname=lower (8.3 names in lower case)
+mount -o ro,shortname=lower "$(part "modem_$slot")" "$tree/vendor/firmware_mnt"
+mount -o ro,shortname=lower "$(part "bluetooth_$slot")" "$tree/vendor/bt_firmware"
+mount -t ext4 -o ro,noload "$(part "dsp_$slot")" "$tree/vendor/dsp"
+mount -t ext4 -o ro,noload "$(part persist)" "$tree/mnt/vendor/persist"
+
+[ ! -e "/dev/mapper/$DM" ] || dmsetup remove "$DM"
+table="$(python3 -I -B "$LIB/lpmeta.py" "$(part super)" "vendor_$slot")"
+dmsetup create --readonly "$DM" --table "$table"
+for p in /firmware /etc/acdbdata/ukee_mtp /etc/sensors /lib64/camera; do
+	mkdir -p "$tree/vendor$(dirname "$p")"
+	fsck.erofs -d0 --extract="$tree/vendor$p" --path="$p" --no-preserve "/dev/mapper/$DM"
+done
+dmsetup remove "$DM"
+
+out="${build_only:-$STATE}"
+mkdir -p "$out"
+say "building firmware-xiaomi-diting"
+FW_TREE="$tree" DITING_TOOLS="$LIB" ART_DIR="$LIB/audioreach-topology" \
+	ATOP_DIR="$LIB/audio-topology" ACDB_QUERY="$LIB/acdb/acdb-query" \
+	"$LIB/diting-build-firmware" "$out"
+[ -z "$build_only" ] || exit 0
+
+say "installing firmware-xiaomi-diting"
+apt-get install -y --no-download --reinstall "$out"/firmware-xiaomi-diting_*_all.deb
+# the package stays on this phone only (it contains Xiaomi/Qualcomm firmware)
+touch "$STATE/done"
+if [ "$reboot" = 1 ]; then
+	say "done; rebooting so that the DSPs, GPU and modem start with their firmware"
+	systemctl reboot
+fi
+say "done; reboot to start the DSPs, GPU and modem with their firmware"

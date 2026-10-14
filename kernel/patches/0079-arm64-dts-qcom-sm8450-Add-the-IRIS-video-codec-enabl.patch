@@ -1,0 +1,130 @@
+From 4db11d982c35394c1c076cba205c5dc251656529 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 20:29:42 +0200
+Subject: [PATCH 79/79] arm64: dts: qcom: sm8450: Add the IRIS video codec;
+ enable it on Diting
+
+The node follows the vendor qcom,vidc@aa00000 node of the Xiaomi 12T Pro
+(register window 0xf0000, SPI 174, MVS0C/MVS0 GDSCs, GCC AXI0 clock and
+reset, the non-secure and non-secure pixel stream IDs 0x2180/0x2187 with
+mask 0x400, the video_mem carveout) and the SM8550 iris node layout. The
+OPPs are the vendor allowed clock rates (240, 338, 366, 444 MHz) with the
+corner votes of SM8550.
+
+Diting loads the vendor vpu20_4v.mbn (video-firmware.2.4).
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8450.dtsi          | 75 +++++++++++++++++++
+ .../boot/dts/qcom/sm8475-xiaomi-diting.dts    |  7 ++
+ 2 files changed, 82 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8450.dtsi b/arch/arm64/boot/dts/qcom/sm8450.dtsi
+index 676790ddd..e8ec25d2f 100644
+--- a/arch/arm64/boot/dts/qcom/sm8450.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8450.dtsi
+@@ -3259,6 +3259,81 @@ IPCC_MPROC_SIGNAL_GLINK_QMP
+ 			};
+ 		};
+ 
++		iris: video-codec@aa00000 {
++			compatible = "qcom,sm8450-iris";
++
++			reg = <0 0x0aa00000 0 0xf0000>;
++			interrupts = <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
++
++			power-domains = <&videocc VIDEO_CC_MVS0C_GDSC>,
++					<&videocc VIDEO_CC_MVS0_GDSC>,
++					<&rpmhpd RPMHPD_MXC>,
++					<&rpmhpd RPMHPD_MMCX>;
++			power-domain-names = "venus",
++					     "vcodec0",
++					     "mxc",
++					     "mmcx";
++			operating-points-v2 = <&iris_opp_table>;
++
++			clocks = <&gcc GCC_VIDEO_AXI0_CLK>,
++				 <&videocc VIDEO_CC_MVS0C_CLK>,
++				 <&videocc VIDEO_CC_MVS0_CLK>;
++			clock-names = "iface",
++				      "core",
++				      "vcodec0_core";
++
++			interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++					 &config_noc SLAVE_VENUS_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
++					<&mmss_noc MASTER_VIDEO QCOM_ICC_TAG_ALWAYS
++					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
++			interconnect-names = "cpu-cfg",
++					     "video-mem";
++
++			memory-region = <&video_mem>;
++
++			resets = <&gcc GCC_VIDEO_AXI0_CLK_ARES>;
++			reset-names = "bus";
++
++			iommus = <&apps_smmu 0x2180 0x400>,
++				 <&apps_smmu 0x2187 0x400>;
++			dma-coherent;
++
++			/*
++			 * IRIS firmware is signed by vendors, only
++			 * enable on boards where the proper signed firmware
++			 * is available.
++			 */
++			status = "disabled";
++
++			iris_opp_table: opp-table {
++				compatible = "operating-points-v2";
++
++				opp-240000000 {
++					opp-hz = /bits/ 64 <240000000>;
++					required-opps = <&rpmhpd_opp_svs>,
++							<&rpmhpd_opp_low_svs>;
++				};
++
++				opp-338000000 {
++					opp-hz = /bits/ 64 <338000000>;
++					required-opps = <&rpmhpd_opp_svs>,
++							<&rpmhpd_opp_svs>;
++				};
++
++				opp-366000000 {
++					opp-hz = /bits/ 64 <366000000>;
++					required-opps = <&rpmhpd_opp_svs>,
++							<&rpmhpd_opp_svs_l1>;
++				};
++
++				opp-444000000 {
++					opp-hz = /bits/ 64 <444000000>;
++					required-opps = <&rpmhpd_opp_svs_l1>,
++							<&rpmhpd_opp_nom>;
++				};
++			};
++		};
++
+ 		videocc: clock-controller@aaf0000 {
+ 			compatible = "qcom,sm8450-videocc";
+ 			reg = <0 0x0aaf0000 0 0x10000>;
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 3508052a7..d62756a6e 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -658,6 +658,13 @@ &ipa {
+ 	status = "okay";
+ };
+ 
++&iris {
++	/* vendor: vidc,firmware-name = "vpu20_4v" (video-firmware.2.4) */
++	firmware-name = "qcom/sm8475/xiaomi/diting/vpu20_4v.mbn";
++
++	status = "okay";
++};
++
+ &camss {
+ 	/*
+ 	 * CSIPHY rails as the vendor DT csiphy nodes: csi-vdd-0p9 is
+-- 
+2.47.3
+

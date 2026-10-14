@@ -1,0 +1,20 @@
+[Unit]
+Description=Xiaomi Diting USB gadget (NCM network + ACM serial)
+Documentation=file:///usr/share/doc/device-xiaomi-diting
+# Started by udev when a USB device controller registers (see
+# 90-diting-usb-gadget.rules); skipped when there is none.
+ConditionDirectoryNotEmpty=/sys/class/udc
+After=sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+# NetworkManager configures usb0 (diting-usb0 profile); a pre-set address
+# would make it treat the device as externally managed.
+Environment=DITING_USB_ADDR=
+RemainAfterExit=yes
+ExecStart=/usr/lib/diting/diting-usb-gadget start
+ExecStop=/usr/lib/diting/diting-usb-gadget stop
+
+[Install]
+WantedBy=multi-user.target

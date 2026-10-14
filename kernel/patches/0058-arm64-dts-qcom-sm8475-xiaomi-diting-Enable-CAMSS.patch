@@ -1,0 +1,39 @@
+From 4db441bd286b331fbebde388d2bc4aaec01905aa Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 16:00:22 +0200
+Subject: [PATCH] arm64: dts: qcom: sm8475-xiaomi-diting: Enable CAMSS
+
+Enable the camera subsystem with the CSIPHY supplies of the vendor DT
+csiphy nodes: csi-vdd-0p9 on pm8350 L5 and csi-vdd-1p2 on pm8350c L10
+(the Galaxy Tab S8+ uses L6B for the latter). No sensors yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index b12b097e6..724ed5c6b 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -569,6 +569,17 @@ &ipa {
+ 	status = "okay";
+ };
+ 
++&camss {
++	/*
++	 * CSIPHY rails as the vendor DT csiphy nodes: csi-vdd-0p9 is
++	 * pm8350 L5 (0.88 V, 147 mA), csi-vdd-1p2 is pm8350c L10 (1.2 V,
++	 * 59.4 mA). No sensors yet.
++	 */
++	vdda-phy-supply = <&vreg_l5b_0p88>;
++	vdda-pll-supply = <&vreg_l10c_1p2>;
++	status = "okay";
++};
++
+ &remoteproc_slpi {
+ 	/*
+ 	 * Sensor DSP; squashed from the vendor firmware_mnt slpi.mdt + slpi.bNN.
+-- 
+2.47.3
+

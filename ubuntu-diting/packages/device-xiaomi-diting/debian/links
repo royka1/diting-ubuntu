@@ -1,0 +1,1 @@
+etc/kernel/postinst.d/zz-diting-bootimg etc/initramfs/post-update.d/zz-diting-bootimg

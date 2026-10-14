@@ -1,0 +1,54 @@
+From 7d52bbf0f103e57cc618bcae5d3f8ccaf2b1d9de Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Mon, 17 Aug 2026 23:12:06 +0200
+Subject: [PATCH 72/74] media: qcom: camss: rate C-PHY settings per trio, not
+ per link
+
+The data-rate table was compared against the total rate across all
+trios, but the vendor driver's thresholds are per trio: every rate up
+to the 2.5 Gsym/s the PHY tops out at shares one register program.
+With the old math a 998.4 Msym/s sensor (6.8 Gbit/s across three
+trios) overshot the single 5.7e9 entry and got no rate settings at
+all, while the same sensor is comfortably inside the vendor's only
+bucket. No change for the S5KHMX, which stays in the same bucket
+either way.
+
+Derived from the kona LA.UM.9.14.1 camera-kernel csiphy 2.0 tables,
+where the only per-rate delta below the cap is one register, constant
+across our range.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+index 4ff509b96..e3630236e 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy-3ph-1-0.c
+@@ -1328,7 +1328,6 @@ static void csiphy_configure_data_rate(struct csiphy_device *csiphy,
+ 				       struct csiphy_config *cfg, s64 link_freq)
+ {
+ 	const struct csiphy_device_regs *regs = csiphy->regs;
+-	struct csiphy_lanes_cfg *c = &cfg->csi2->lane_cfg;
+ 	u64 data_rate;
+ 	int i, j;
+ 
+@@ -1337,9 +1336,12 @@ static void csiphy_configure_data_rate(struct csiphy_device *csiphy,
+ 
+ 	/*
+ 	 * C-PHY moves 16 bits per 7 symbols on each trio, which the vendor
+-	 * tables express as 2.28 bits per symbol.
++	 * tables express as 2.28 bits per symbol. The table thresholds are
++	 * per trio, as in the vendor driver, where every rate up to the
++	 * 2.5 Gsym/s the PHY tops out at shares one register program - so
++	 * do not multiply by the trio count.
+ 	 */
+-	data_rate = div_u64((u64)link_freq * 228 * c->num_data, 100);
++	data_rate = div_u64((u64)link_freq * 228, 100);
+ 
+ 	for (i = 0; i < regs->data_rate_array_size; i++) {
+ 		const struct csiphy_data_rate_regs *e = &regs->data_rate_regs[i];
+-- 
+2.47.3
+

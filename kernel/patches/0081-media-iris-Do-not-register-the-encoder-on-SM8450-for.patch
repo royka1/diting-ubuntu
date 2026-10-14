@@ -1,0 +1,72 @@
+From 1b63df5f3fe4a7acb2e9490edcd9f94e65d5fa8a Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 22:30:18 +0200
+Subject: [PATCH 81/81] media: iris: Do not register the encoder on SM8450 for
+ now
+
+With the Gen2 firmware of SM8450/SM8475 the encoder hangs the firmware
+when the raw input port is started (with the core GDSC in hardware
+mode). The next command write then resets the whole SoC. Any
+application that probes or opens the encoder node could reset the
+phone, so register only the decoder until encoding works.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/media/platform/qcom/iris/iris_platform_common.h | 2 ++
+ drivers/media/platform/qcom/iris/iris_platform_vpu2.c   | 5 +++++
+ drivers/media/platform/qcom/iris/iris_probe.c           | 8 +++++---
+ 3 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index cb0aea7c0..35b3750e5 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -323,6 +323,8 @@ struct iris_platform_data {
+ 	u32 tz_cp_config_data_size;
+ 	u32 num_vpp_pipe;
+ 	bool no_aon;
++	/* Do not register the encoder (encoding not working on this SoC) */
++	bool no_encoder;
+ 	u32 max_session_count;
+ 	/* max number of macroblocks per frame supported */
+ 	u32 max_core_mbpf;
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+index 8398a7666..74f363dbe 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu2.c
+@@ -160,6 +160,11 @@ const struct iris_platform_data sm8450_data = {
+ 	.tz_cp_config_data = tz_cp_config_vpu2,
+ 	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu2),
+ 	.num_vpp_pipe = 4,
++	/*
++	 * The encoder hangs the firmware at the start of a session and the
++	 * next register access resets the SoC; keep it off until fixed.
++	 */
++	.no_encoder = true,
+ 	.max_session_count = 16,
+ 	.max_core_mbpf = NUM_MBS_8K,
+ 	.max_core_mbps = ((7680 * 4320) / 256) * 60,
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index aa7430229..8951760ee 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -281,9 +281,11 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+ 
+-	ret = iris_register_video_device(core, ENCODER);
+-	if (ret)
+-		goto err_vdev_unreg_dec;
++	if (!core->iris_platform_data->no_encoder) {
++		ret = iris_register_video_device(core, ENCODER);
++		if (ret)
++			goto err_vdev_unreg_dec;
++	}
+ 
+ 	platform_set_drvdata(pdev, core);
+ 
+-- 
+2.47.3
+

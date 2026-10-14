@@ -1,0 +1,37 @@
+From 0c875f43574af951660211bdfbfba121348a7f26 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 14:49:32 +0200
+Subject: [PATCH] arm64: dts: qcom: sm8475-xiaomi-diting: Enable the SLPI
+
+Enable the sensor DSP with the firmware squashed from the vendor
+firmware_mnt slpi.mdt/slpi.bNN. The carveout in sm8450.dtsi
+(0x88000000, 0x1900000) matches the vendor device tree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+index 850f9addd..b12b097e6 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-diting.dts
+@@ -569,6 +569,15 @@ &ipa {
+ 	status = "okay";
+ };
+ 
++&remoteproc_slpi {
++	/*
++	 * Sensor DSP; squashed from the vendor firmware_mnt slpi.mdt + slpi.bNN.
++	 * Carveout as the vendor DT (slpi_region@88000000, 0x1900000).
++	 */
++	firmware-name = "qcom/sm8475/xiaomi/diting/slpi.mbn";
++	status = "okay";
++};
++
+ &remoteproc_mpss {
+ 	/* squashed from the vendor firmware_mnt modem.mdt + modem.bNN */
+ 	firmware-name = "qcom/sm8475/xiaomi/diting/modem.mbn";
+-- 
+2.47.3
+

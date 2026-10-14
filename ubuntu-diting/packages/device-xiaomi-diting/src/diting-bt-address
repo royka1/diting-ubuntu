@@ -1,0 +1,27 @@
+#!/bin/sh
+# Print the Bluetooth address for the QCA6490. The vendor address lives in a
+# partition Linux does not read and the controller reports an invalid one.
+# Uses /etc/diting/bt-address when the owner provides one, else a stable
+# locally administered address derived from the machine id.
+#   diting-bt-address            -> 42:D9:D3:02:D8:08
+#   diting-bt-address --le-bytes -> 08 d8 02 d3 d9 42 (DT local-bd-address)
+set -e
+if [ -s /etc/diting/bt-address ]; then
+	addr="$(tr -d ' \n' < /etc/diting/bt-address)"
+else
+	[ -s /etc/machine-id ] && [ "$(cat /etc/machine-id)" != uninitialized ] ||
+		exit 1	# first boot: no stable id yet
+	h="$(printf '%s-diting-bt' "$(cat /etc/machine-id)" | sha256sum | cut -c1-12)"
+	first=$(( (0x${h%??????????} & 0xfc) | 0x02 ))	# locally administered, unicast
+	rest="$(echo "${h#??}" | sed 's/../&:/g; s/:$//' | tr a-f A-F)"
+	addr="$(printf '%02X' "$first"):$rest"
+fi
+case "$addr" in
+??:??:??:??:??:??) ;;
+*) echo "diting-bt-address: invalid address '$addr'" >&2; exit 1 ;;
+esac
+if [ "$1" = --le-bytes ]; then
+	echo "$addr" | tr A-F a-f | awk -F: '{print $6, $5, $4, $3, $2, $1}'
+else
+	echo "$addr"
+fi

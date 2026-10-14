@@ -1,0 +1,30 @@
+From a8e09bbe76cbc3af117d351f6ce3df3288b69cfe Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 20:28:45 +0200
+Subject: [PATCH 77/79] dt-bindings: media: qcom,sm8550-iris: Add SM8450
+
+SM8450 (and SM8475) have an IRIS2 video codec with the same resources
+as SM8550: two GDSCs plus MXC and MMCX, three clocks and the bus reset.
+
+Local Diting bring-up change, not submitted upstream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml b/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
+index 0400ca1bf..5f3ca956c 100644
+--- a/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
++++ b/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
+@@ -24,6 +24,7 @@ properties:
+           - const: qcom,sm8550-iris
+       - enum:
+           - qcom,qcs8300-iris
++          - qcom,sm8450-iris
+           - qcom,sm8550-iris
+           - qcom,sm8650-iris
+           - qcom,x1p42100-iris
+-- 
+2.47.3
+
