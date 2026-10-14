@@ -3,7 +3,7 @@
 . "$(dirname "$0")/lib.sh"
 need dpkg-buildpackage dh fakeroot
 
-PKG_VERSION="${DEVICE_PKG_VERSION:-0.7.9}"
+PKG_VERSION="${DEVICE_PKG_VERSION:-0.7.11}"
 src="$UD/packages/device-xiaomi-diting"
 bld="$WORK/pkg/device-xiaomi-diting-$PKG_VERSION"
 

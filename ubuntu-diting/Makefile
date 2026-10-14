@@ -4,7 +4,7 @@
 S := scripts
 SUDO ?= sudo -E
 
-.PHONY: help check-host sources check-latest-kernel update-kernel kernel dtbs phoc sensors libcamera \
+.PHONY: help modemmanager check-host sources check-latest-kernel update-kernel kernel dtbs phoc sensors libcamera \
 	dtbs-check packages vaapi firmware-setup mobile-config-firefox firmware rootfs release initramfs boot image verify repro-check qemu-test \
 	inspect-device lint clean distclean
 
@@ -40,6 +40,9 @@ packages:
 ## vaapi                libva-v4l2-stateful (VA-API driver for the iris decoder; arm64 buildd chroot)
 vaapi:
 	$(S)/build-libva-v4l2-stateful.sh
+## modemmanager         Ubuntu ModemManager + upstream netlink crash fix (arm64 buildd chroot)
+modemmanager:
+	$(S)/build-modemmanager.sh
 ## mobile-config-firefox  postmarketOS Firefox mobile UI (not in Ubuntu; arm64 buildd chroot)
 mobile-config-firefox:
 	$(S)/build-mobile-config-firefox.sh
@@ -59,7 +62,7 @@ libcamera:
 phoc:
 	$(S)/build-phoc.sh
 ## rootfs               Ubuntu rootfs + ext4 image (needs root, uses sudo; ROOTFS_PROFILE=owner|public)
-rootfs: kernel packages vaapi firmware-setup mobile-config-firefox
+rootfs: kernel packages vaapi firmware-setup mobile-config-firefox modemmanager
 	$(SUDO) $(S)/build-rootfs.sh
 ## initramfs            regenerate the initramfs inside the rootfs (initramfs-tools)
 initramfs:

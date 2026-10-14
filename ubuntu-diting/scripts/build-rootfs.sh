@@ -46,6 +46,12 @@ fi
 # Optional: phoc with the refresh-rate fix (scripts/build-phoc.sh).
 PHOC_DEBS=("$OUT"/debs/phoc_*diting*_arm64.deb)
 [ -f "${PHOC_DEBS[0]}" ] || { warn "no patched phoc (scripts/build-phoc.sh): refresh-rate switching reverts"; PHOC_DEBS=(); }
+# ModemManager with the netlink use-after-free fix (scripts/build-modemmanager.sh)
+MM_DEBS=("$OUT"/debs/modemmanager_*diting*_arm64.deb "$OUT"/debs/libmm-glib0_*diting*_arm64.deb)
+if [ ! -f "${MM_DEBS[0]}" ] || [ ! -f "${MM_DEBS[1]}" ]; then
+	warn "no patched ModemManager (scripts/build-modemmanager.sh): it crashes reconnecting after suspend"
+	MM_DEBS=()
+fi
 # libcamera with the diting sensor support: the runtime packages only
 LIBCAMERA_DEBS=()
 for p in libcamera0.7 libcamera-ipa libcamera-tools libcamera-v4l2 gstreamer1.0-libcamera; do
@@ -133,7 +139,7 @@ else
 fi
 
 mkdir -p "$ROOT/tmp/debs"
-cp "${DEBS[@]}" "${FW_DEBS[@]}" "${RPC_DEBS[@]}" "${HRPC_DEBS[@]}" "${SSC_DEBS[@]}" "${PHOC_DEBS[@]}" "${LIBCAMERA_DEBS[@]}" "$ROOT/tmp/debs/"
+cp "${DEBS[@]}" "${FW_DEBS[@]}" "${RPC_DEBS[@]}" "${HRPC_DEBS[@]}" "${SSC_DEBS[@]}" "${PHOC_DEBS[@]}" "${MM_DEBS[@]}" "${LIBCAMERA_DEBS[@]}" "$ROOT/tmp/debs/"
 # Device package first, so its initramfs config and hooks are in place
 # when the kernel postinst runs update-initramfs.
 in_root apt-get -y install --reinstall --no-install-recommends "/tmp/debs/${DEBS[1]##*/}"
@@ -154,6 +160,8 @@ if [ ${#LIBCAMERA_DEBS[@]} -gt 0 ]; then
 fi
 [ ${#PHOC_DEBS[@]} -eq 0 ] || [ "${ROOTFS_DESKTOP:-none}" = none ] ||
 	in_root sh -c 'apt-get -y install --reinstall --allow-downgrades --no-install-recommends /tmp/debs/phoc_*diting*_arm64.deb'
+[ ${#MM_DEBS[@]} -eq 0 ] ||
+	in_root sh -c 'apt-get -y install --allow-downgrades --no-install-recommends /tmp/debs/modemmanager_*diting*_arm64.deb /tmp/debs/libmm-glib0_*diting*_arm64.deb'
 rm -rf "$ROOT/tmp/debs"
 
 # Optional desktop stage (needs display/touch; GPU-less software rendering

@@ -1,0 +1,7 @@
+# Keep the locally rebuilt ModemManager (upstream netlink use-after-free fix
+# 9317cbc4, see packages/modemmanager/) even when Ubuntu publishes a newer
+# version: the archive 1.25.95 crashes when it re-creates the data link
+# after a resume. Drop this once the archive version contains the fix.
+Package: modemmanager libmm-glib0
+Pin: version *diting*
+Pin-Priority: 1001
