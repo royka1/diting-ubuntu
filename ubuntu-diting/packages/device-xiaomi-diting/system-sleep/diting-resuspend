@@ -1,0 +1,10 @@
+#!/bin/sh
+# Record the key interrupt counts before suspend; after resume, check whether
+# the phone should go back to sleep (diting-resuspend.service). Runs inside
+# systemd-sleep, so do not block.
+[ "$2" = suspend ] || exit 0
+case "$1" in
+pre) /usr/libexec/diting/diting-resuspend --pre ;;
+post) systemctl --no-block restart diting-resuspend.service ;;
+esac
+exit 0

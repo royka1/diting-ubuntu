@@ -46,3 +46,6 @@ systemd/10-diting-modemmanager.conf usr/lib/systemd/system/ModemManager.service.
 etc/modemmanager-diting.pref etc/apt/preferences.d
 src/diting-wifi-band-steer usr/libexec/diting
 systemd/diting-wifi-band-steer.service usr/lib/systemd/system
+src/diting-resuspend usr/libexec/diting
+systemd/diting-resuspend.service usr/lib/systemd/system
+system-sleep/diting-resuspend usr/lib/systemd/system-sleep

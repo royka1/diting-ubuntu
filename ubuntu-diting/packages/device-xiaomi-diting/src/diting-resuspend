@@ -1,0 +1,87 @@
+#!/bin/bash
+# Put the phone back to sleep after a wake-up that nobody asked for.
+#
+# The ADSP charger firmware sends a Xiaomi status message every 480 s, and
+# that message ends deep sleep. After every resume GNOME turns the screen on
+# for a minute and its idle timer does not suspend again, so without this
+# the phone stays awake with the screen off until it is next used.
+#
+# The system-sleep hook runs "diting-resuspend --pre" before suspend (records
+# the power and volume key interrupt counts) and starts this service after
+# resume. The service suspends again unless, within RESUSPEND_DELAY seconds
+# of the resume, a key was pressed or any input device reported an event
+# (touch, keys, headset), something inhibits sleep, or a call is active.
+set -u
+
+DELAY="${RESUSPEND_DELAY:-20}"
+KEYS=/run/diting-resuspend.keys
+
+key_irqs() {
+	awk '/pmic_pwrkey|pmic_resin/ {
+		for (i = 2; i <= NF && $i ~ /^[0-9]+$/; i++) s += $i
+	} END { print s + 0 }' /proc/interrupts
+}
+
+if [ "${1:-}" = --pre ]; then
+	key_irqs > "$KEYS"
+	exit 0
+fi
+
+# Wait up to DELAY seconds for an event on any input device; 0 = event seen
+input_seen() {
+	python3 -I -c '
+import os, select, sys
+fds = []
+for p in sys.argv[2:]:
+    try:
+        fds.append(os.open(p, os.O_RDONLY | os.O_NONBLOCK))
+    except OSError:
+        pass
+r, _, _ = select.select(fds, [], [], float(sys.argv[1]))
+sys.exit(0 if r else 1)
+' "$1" /dev/input/event*
+}
+
+# logind block inhibitors (systemd-inhibit --what=sleep --mode=block)
+logind_inhibited() {
+	busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+		org.freedesktop.login1.Manager BlockInhibited 2>/dev/null |
+		grep -qE '[":]sleep[":]'
+}
+
+# Apps asking the desktop session not to suspend (GTK inhibit, flag 4)
+session_inhibited() {
+	local bus uid user
+	for bus in /run/user/*/bus; do
+		[ -S "$bus" ] || continue
+		uid="${bus#/run/user/}"; uid="${uid%/bus}"
+		user="$(id -nu "$uid" 2>/dev/null)" || continue
+		busctl --user -M "$user@" call org.gnome.SessionManager \
+			/org/gnome/SessionManager org.gnome.SessionManager \
+			IsInhibited u 4 2>/dev/null | grep -qx 'b true' && return 0
+	done
+	return 1
+}
+
+call_active() {
+	command -v mmcli >/dev/null || return 1
+	mmcli -m any --voice-list-calls 2>/dev/null | grep -q '/Call/'
+}
+
+if input_seen "$DELAY"; then
+	echo "input after resume: staying awake"
+	exit 0
+fi
+if [ -r "$KEYS" ] && [ "$(key_irqs)" != "$(cat "$KEYS")" ]; then
+	echo "key pressed since suspend: staying awake"
+	exit 0
+fi
+for check in logind_inhibited session_inhibited call_active; do
+	if "$check"; then
+		echo "$check: staying awake"
+		exit 0
+	fi
+done
+
+echo "no input ${DELAY} s after resume and nothing inhibits sleep: suspending again"
+exec systemctl suspend

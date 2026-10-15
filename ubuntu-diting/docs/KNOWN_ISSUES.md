@@ -1,6 +1,6 @@
 # Known issues and risks
 
-State as of 2026-10-15 (kernel 7.2.10-diting r44, device-xiaomi-diting 0.7.14,
+State as of 2026-10-15 (kernel 7.2.10-diting r45, device-xiaomi-diting 0.7.15,
 firmware-xiaomi-diting 0.9.4, diting-firmware-setup 0.1.1). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
@@ -76,6 +76,18 @@ in `docs/BRINGUP_STATUS.md`.
   interrupt after resume); in 60 s RTC tests it slept the full period in about
   half of the cycles. ModemManager does not ask the modem to suppress them
   while the screen is off (Android does).
+- **Phone stayed awake after a wake-up from sleep** (fixed in device package
+  0.7.15, kernel r45): the ADSP charger firmware sends a Xiaomi status
+  message (opcode 0x50) every 480 s, and it ends deep sleep (5 of 5 traced
+  wakes on 2026-10-15). GNOME turns the screen on for a minute after every
+  resume and then does not suspend again until the phone is used, so the
+  phone stayed awake with the screen off for 20-80 minutes and got warm.
+  `diting-resuspend` (a system-sleep hook and service) suspends again 20 s
+  after a resume unless a key was pressed, any input device reported an
+  event, something inhibits sleep, or a call is active. Switch it off with
+  `sudo systemctl mask diting-resuspend.service`. The screen still lights up
+  for those 20 s every 8 minutes. Kernel patch 0093 drops the 0x50 message
+  (it used to complete the ack of a pending battery request).
 - **Fixed in device package 0.7.10/0.7.11**: calls had no audio since kernel
   r30 (libadsprpc used the system dma-buf heap; the audio PD now uses the
   fastrpc allocator); mobile data was lost after every suspend (ModemManager

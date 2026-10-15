@@ -1,0 +1,7 @@
+[Unit]
+Description=Suspend again after a wake-up without user input
+Documentation=file:///usr/libexec/diting/diting-resuspend
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/diting/diting-resuspend
