@@ -9,6 +9,7 @@ etc/no-generic-kernel.pref etc/apt/preferences.d
 bootimg.conf etc/diting
 systemd/diting-usb-gadget.service usr/lib/systemd/system
 etc/diting-bringup.conf etc/modprobe.d
+etc/diting-dsp.conf etc/modprobe.d
 udev/90-diting-usb-gadget.rules usr/lib/udev/rules.d
 systemd/10-diting.preset usr/lib/systemd/system-preset
 initramfs-tools/scripts/init-bottom/diting-debug usr/share/initramfs-tools/scripts/init-bottom

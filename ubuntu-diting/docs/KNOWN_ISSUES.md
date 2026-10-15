@@ -1,11 +1,31 @@
 # Known issues and risks
 
-State as of 2026-10-14 (kernel 7.2.10-diting r43, device-xiaomi-diting 0.7.13,
+State as of 2026-10-15 (kernel 7.2.10-diting r44, device-xiaomi-diting 0.7.14,
 firmware-xiaomi-diting 0.9.4, diting-firmware-setup 0.1.1). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
 ## Open, device-confirmed
 
+- **Charging state** (r44, patch 0091): the firmware reports the battery
+  current as negative while charging, and upower 1.91 calls any battery with
+  a negative `current_now` "discharging". The phone then showed discharging
+  on the charger, and on 2026-10-15 at 2 % upower powered it off while it was
+  plugged in. 0091 negates the value; DEVICE-TESTED on the stock fast charger:
+  upower now reports charging, and unplugged discharging (-180 mA at 99 %).
+  Not yet measured: charging from a low level (on 9 V / 1.16 A at 96 % the firmware reported
+  USB type SDP, current_max 2 A).
+- **GPU faults** still happen now and then: GMU HFI messages time out
+  (`HFI_H2F_MSG_GX_BW_PERF_VOTE ... timed out`, a few per hour) and once,
+  during a phone call, the GPU faulted (CP read of iova 0) and hangcheck
+  started recovery. Before r44 (0090) recovery and the SMMU fault handler
+  deadlocked on `gpu->lock`: phoc stayed in D state, the screen stayed dark
+  and the power key did nothing until a reboot. With 0090 the GMU wait gives
+  up after 1 s so recovery can finish; that path has not yet run on the
+  phone. A second hang (under Waydroid) showed that recovery does run with
+  0090 but the GMU never initialises again, so the screen still stays dark.
+  Both hangs started when the GPU resumed from idle. r44 (0092) keeps the
+  A730 powered for 1 s after it goes idle instead of 66 ms, as an
+  experiment to make resumes rarer; whether it helps is not yet known.
 - **Call audio** works in both directions on 3G calls, with Fluence echo and
   noise cancellation; calls start on the earpiece, the Calls app's speaker
   and mute buttons work (diting-callaudio replaces callaudiod, whose port
@@ -173,12 +193,24 @@ on the test phone now sets 10 s (applies only after systemd-sysctl).
 
 ## Fixed, kept here for context
 
+- **ADSP services late or missing after boot** (device package 0.7.14):
+  udev loaded `qcom_pd_mapper` in parallel with `qcom_q6v5_pas`; when the
+  ADSP (started first, ~7 s) found no PD mapper it retried only after 50 s,
+  300 s or not at all. Until then the battery read 0 % (`-EAGAIN`), charging
+  was not reported, speaker protection failed and there was no sound card.
+  `/etc/modprobe.d/diting-dsp.conf` now loads the PD mapper first: ADSP
+  services at ~13 s, sound card and speaker protection at ~15 s.
 - **GPU GMU resume** (0027): the A730v3 GMU needs up to 12 ms to leave reset;
   upstream waited 10 ms. Now 100 ms like downstream.
 - **A/B retry counter**: `diting-boot-successful.service` marks the slot
   successful, else ABL marks it unbootable after 7 boots.
 - **Mobile data** (0030–0043, firmware 0.6.0): IPA v5.1 from the XEC kernel.
   The ModemManager TUN placeholder port of device package 0.4.x is gone.
+
+- **Waydroid** (2026-10-15): Android had no internet (kernel lacked policy
+  routing; fixed in r44) and no shared storage (the MAINLINE vendor image
+  declares an OMX codec service it does not ship, so MediaProvider hangs).
+  Steps for users: `docs/WAYDROID.md`.
 
 ## Configuration the owner sets per phone (not packaged)
 

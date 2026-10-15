@@ -82,6 +82,9 @@ does not work. Details: `docs/KNOWN_ISSUES.md` in the source repository.
   `/var/lib/diting-firmware-setup/failed` exists; see
   `journalctl -u diting-firmware-setup` and retry with
   `sudo diting-firmware-setup --reboot`.
+- Android apps (Waydroid): not preinstalled. Waydroid's own images need two
+  fixes on this phone (no storage, no internet with kernels before r44); see
+  https://github.com/royka1/diting-ubuntu/blob/main/ubuntu-diting/docs/WAYDROID.md
 
 ## Back to Android
 

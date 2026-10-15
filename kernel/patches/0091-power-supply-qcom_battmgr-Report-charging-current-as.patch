@@ -1,0 +1,42 @@
+From 4357278ad7e12b2a9024db76f1bf19d0a3cc4ee1 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 12:26:54 +0200
+Subject: [PATCH] power: supply: qcom_battmgr: Report charging current as
+ positive
+
+The battery manager firmware reports the battery current as negative
+while charging. The power supply ABI wants positive values for charging
+and negative values for discharging, and upower reports a battery whose
+current_now is negative as discharging even when its status says
+charging. On the Xiaomi 12T Pro the phone therefore showed
+"discharging" on the charger, and at 2 % upower powered it off while it
+was plugged in.
+
+Negate the battery current read from the firmware.
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/power/supply/qcom_battmgr.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 84d9f9777..b7e6570ae 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -1461,7 +1461,12 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 			battmgr->info.voltage_max = le32_to_cpu(resp->intval.value);
+ 			break;
+ 		case BATT_CURR_NOW:
+-			battmgr->status.current_now = le32_to_cpu(resp->intval.value);
++			/*
++			 * The firmware reports charging current as negative,
++			 * the ABI wants it positive (upower takes a negative
++			 * current as discharging, whatever the status says).
++			 */
++			battmgr->status.current_now = -(int)le32_to_cpu(resp->intval.value);
+ 			break;
+ 		case BATT_TEMP:
+ 			val = le32_to_cpu(resp->intval.value);
+-- 
+2.55.0
+

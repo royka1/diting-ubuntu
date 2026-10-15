@@ -1,0 +1,44 @@
+From 4ceb0263c121fe4c45759555e15bc9d7a36fc74d Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 13:33:59 +0200
+Subject: [PATCH] drm/msm/a6xx: Keep the A730 powered for 1 s after it goes
+ idle
+
+On the Xiaomi 12T Pro the GMU sometimes does not acknowledge the
+GPU_SET OOB request when the GPU is resumed. The GPU then locks up,
+and recovery cannot restart the GMU ("GMU firmware initialization timed
+out"), so the display stays dark until a reboot. It happened during a
+phone call and while Waydroid was rendering.
+
+With a 66 ms autosuspend delay the GPU is suspended and resumed many
+times per second, and every resume is a chance to hit this. Use a one
+second delay for the A730 to make resumes much rarer.
+
+This is an experiment: whether it avoids the hangs is not yet known.
+
+Signed-off-by: royka1 <397414+royka1@users.noreply.github.com>
+---
+ drivers/gpu/drm/msm/adreno/a6xx_catalog.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+index a98d550b7..1f4d6c3c2 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
+@@ -1485,7 +1485,12 @@ static const struct adreno_info a7xx_gpus[] = {
+ 			[ADRENO_FW_GMU] = "gmu_gen70000.bin",
+ 		},
+ 		.gmem = SZ_2M,
+-		.inactive_period = DRM_MSM_INACTIVE_PERIOD,
++		/*
++		 * The GMU sometimes stops answering the GPU_SET OOB request
++		 * when the GPU powers up, and then never initialises again.
++		 * Power the GPU down less often.
++		 */
++		.inactive_period = 1000,
+ 		.quirks = ADRENO_QUIRK_HAS_CACHED_COHERENT |
+ 			  ADRENO_QUIRK_HAS_HW_APRIV |
+ 			  ADRENO_QUIRK_PREEMPTION,
+-- 
+2.55.0
+
