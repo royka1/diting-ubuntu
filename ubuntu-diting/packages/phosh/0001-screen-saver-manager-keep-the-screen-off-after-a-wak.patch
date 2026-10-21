@@ -1,0 +1,166 @@
+From 49d84006f68f5c6f4dd252f02471b23b840272a8 Mon Sep 17 00:00:00 2001
+From: royka1 <397414+royka1@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 11:34:55 +0200
+Subject: [PATCH] screen-saver-manager: keep the screen off after a wake-up
+ without user input
+
+On the Xiaomi 12T Pro the charger firmware wakes the system every eight
+minutes. Phosh and gnome-settings-daemon both turn the outputs on at
+every resume, so the screen lights up for each of these wake-ups even
+though a system-sleep hook suspends the phone again 20 s later.
+
+Hold the outputs off from PrepareForSleep(true) on. On resume, release
+the hold and wake the screen as before, unless the system-sleep hook
+created /run/diting-resuspend.dark (no key was pressed during suspend).
+While held, DisplayConfig requests to turn the outputs on (from
+gnome-settings-daemon) are ignored; a power key press, a WakeUpScreen
+request (incoming call, notification) or a direct power-save change
+releases the hold and applies the requested mode.
+---
+ src/monitor-manager.c      | 33 +++++++++++++++++++++++++++++++++
+ src/monitor-manager.h      |  2 ++
+ src/screen-saver-manager.c | 18 +++++++++++++++++-
+ 3 files changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/src/monitor-manager.c b/src/monitor-manager.c
+index e7b416f..f1eeaf6 100644
+--- a/src/monitor-manager.c
++++ b/src/monitor-manager.c
+@@ -83,6 +83,8 @@ typedef struct _PhoshMonitorManager
+   PhoshHead *pending_primary;
+   uint32_t zwlr_output_serial;
+ 
++  gboolean hold_power_on;  /* Ignore D-Bus requests to turn the outputs on */
++
+   GCancellable            *cancel;
+ } PhoshMonitorManager;
+ 
+@@ -884,6 +886,11 @@ power_save_mode_changed_cb (PhoshMonitorManager *self,
+     break;
+   }
+ 
++  if (ps_mode == PHOSH_MONITOR_POWER_SAVE_MODE_ON && self->hold_power_on) {
++    g_debug ("Holding outputs off");
++    return;
++  }
++
+   phosh_monitor_manager_set_power_save_mode (self, ps_mode);
+ }
+ 
+@@ -1625,6 +1632,9 @@ phosh_monitor_manager_set_power_save_mode (PhoshMonitorManager       *self,
+ {
+   g_return_if_fail (PHOSH_IS_MONITOR_MANAGER (self));
+ 
++  if (mode == PHOSH_MONITOR_POWER_SAVE_MODE_ON)
++    self->hold_power_on = FALSE;
++
+   for (int i = 0; i < self->monitors->len; i++) {
+     PhoshMonitor *monitor = g_ptr_array_index (self->monitors, i);
+ 
+@@ -1632,6 +1642,29 @@ phosh_monitor_manager_set_power_save_mode (PhoshMonitorManager       *self,
+   }
+ }
+ 
++/**
++ * phosh_monitor_manager_hold_power_on:
++ * @self: A #PhoshMonitorManager
++ * @hold: Whether to hold the outputs off
++ *
++ * While held, requests to turn the outputs on through the DisplayConfig
++ * D-Bus interface (e.g. from gnome-settings-daemon after a resume) are
++ * ignored. Releasing the hold applies the currently requested mode.
++ */
++void
++phosh_monitor_manager_hold_power_on (PhoshMonitorManager *self, gboolean hold)
++{
++  g_return_if_fail (PHOSH_IS_MONITOR_MANAGER (self));
++
++  if (self->hold_power_on == hold)
++    return;
++
++  g_debug ("%s outputs", hold ? "Holding" : "Releasing");
++  self->hold_power_on = hold;
++  if (!hold)
++    power_save_mode_changed_cb (self, NULL, NULL);
++}
++
+ /**
+  * phosh_monitor_manager_enable_fallback:
+  * @self: a #PhoshMonitorManager
+diff --git a/src/monitor-manager.h b/src/monitor-manager.h
+index f55a09b..3230f59 100644
+--- a/src/monitor-manager.h
++++ b/src/monitor-manager.h
+@@ -53,6 +53,8 @@ void                  phosh_monitor_manager_set_sensor_proxy_manager  (PhoshMoni
+ gboolean              phosh_monitor_manager_enable_fallback           (PhoshMonitorManager *self);
+ void                  phosh_monitor_manager_set_power_save_mode       (PhoshMonitorManager *self,
+                                                                        PhoshMonitorPowerSaveMode mode);
++void                  phosh_monitor_manager_hold_power_on             (PhoshMonitorManager *self,
++                                                                       gboolean             hold);
+ gboolean              phosh_monitor_manager_get_night_light_supported (PhoshMonitorManager *self);
+ guint32               phosh_monitor_manager_get_night_light_temp      (PhoshMonitorManager *self);
+ 
+diff --git a/src/screen-saver-manager.c b/src/screen-saver-manager.c
+index 9f9439f..c40a9eb 100644
+--- a/src/screen-saver-manager.c
++++ b/src/screen-saver-manager.c
+@@ -18,6 +18,8 @@
+ #include "session-presence.h"
+ #include "util.h"
+ 
++#include "monitor-manager.h"
++
+ #include <glib/gstdio.h>
+ #include <gio/gunixfdlist.h>
+ 
+@@ -47,6 +49,9 @@
+  * the screen be locked.
+  */
+ 
++/* Created by a system-sleep hook when the system woke up without user input */
++#define DARK_RESUME_FILE "/run/diting-resuspend.dark"
++
+ #define SCREEN_SAVER_DBUS_NAME "org.gnome.ScreenSaver"
+ 
+ #define LOGIN_BUS_NAME "org.freedesktop.login1"
+@@ -211,6 +216,8 @@ on_power_button_pressed (GSimpleAction *action, GVariant *param, gpointer data)
+ 
+   /* Press already unblanks since presence status changes due to key press so nothing to do here */
+   if (press) {
++    phosh_monitor_manager_hold_power_on (phosh_shell_get_monitor_manager (phosh_shell_get_default ()),
++                                         FALSE);
+     state_on_press = self->active;
+     return;
+   }
+@@ -458,6 +465,9 @@ phosh_screen_saver_manager_wakeup_screen (PhoshScreenSaverManager *self)
+ 
+   g_return_if_fail (PHOSH_IS_SCREEN_SAVER_MANAGER (self));
+ 
++  phosh_monitor_manager_hold_power_on (phosh_shell_get_monitor_manager (phosh_shell_get_default ()),
++                                       FALSE);
++
+   skeleton = G_DBUS_INTERFACE_SKELETON (self);
+   g_debug ("Signaling WakeUpScreen");
+   g_dbus_connection_emit_signal (g_dbus_interface_skeleton_get_connection (skeleton),
+@@ -554,11 +564,17 @@ on_logind_prepare_for_sleep (PhoshScreenSaverManager *self,
+ 
+   g_debug ("Got PrepareForSleep signal: %s", suspending ? "suspend" : "resume");
+   if (suspending) {
++    /* Keep the outputs off on resume until we know why the system woke up */
++    phosh_monitor_manager_hold_power_on (phosh_shell_get_monitor_manager (phosh_shell_get_default ()),
++                                         TRUE);
+     phosh_lockscreen_manager_set_locked (self->lockscreen_manager, TRUE);
+   } else {
+     PhoshIdleManager *idle_manager;
+ 
+-    phosh_screen_saver_manager_wakeup_screen (self);
++    if (g_file_test (DARK_RESUME_FILE, G_FILE_TEST_EXISTS))
++      g_debug ("Woke up without user input, keeping the screen off");
++    else
++      phosh_screen_saver_manager_wakeup_screen (self);
+ 
+     idle_manager = phosh_idle_manager_get_default ();
+     phosh_idle_manager_reset_timers (idle_manager);
+-- 
+2.55.0
+

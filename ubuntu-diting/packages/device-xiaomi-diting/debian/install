@@ -41,6 +41,7 @@ udev/90-diting-sensors.rules usr/lib/udev/rules.d
 tmpfiles/diting-sensors.conf usr/lib/tmpfiles.d
 udev/81-diting-ssc-sensors.rules usr/lib/udev/rules.d
 udev/60-diting-camera.rules usr/lib/udev/rules.d
+udev/70-diting-cdsp.rules usr/lib/udev/rules.d
 libcamera/s5khp1.yaml usr/share/libcamera/ipa/simple
 systemd/10-diting-modemmanager.conf usr/lib/systemd/system/ModemManager.service.d
 etc/modemmanager-diting.pref etc/apt/preferences.d
@@ -49,3 +50,4 @@ systemd/diting-wifi-band-steer.service usr/lib/systemd/system
 src/diting-resuspend usr/libexec/diting
 systemd/diting-resuspend.service usr/lib/systemd/system
 system-sleep/diting-resuspend usr/lib/systemd/system-sleep
+fastrpc/xiaomi-diting.yaml usr/share/qcom/conf.d

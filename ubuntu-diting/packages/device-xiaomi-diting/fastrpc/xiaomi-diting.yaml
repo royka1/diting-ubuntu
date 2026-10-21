@@ -1,0 +1,7 @@
+# FastRPC (libadsprpc/libcdsprpc): DSP library directory for this phone,
+# relative to /usr/share/qcom/. The library looks in <dir>/<adsp|cdsp|sdsp>/
+# for the process shells (fastrpc_shell_unsigned_3, ...) from
+# firmware-xiaomi-diting. The machine name is the device tree model.
+machines:
+  Xiaomi 12T Pro / Redmi K50 Ultra:
+    DSP_LIBRARY_PATH: sm8475/Xiaomi/diting/dsp

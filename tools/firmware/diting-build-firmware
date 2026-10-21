@@ -46,7 +46,7 @@ done
 [ -x "${ACDB_QUERY:-}" ] || die "ACDB_QUERY must point to the acdb-query binary"
 
 PKG=firmware-xiaomi-diting
-PKG_VERSION="${FIRMWARE_PKG_VERSION:-0.9.4}"
+PKG_VERSION="${FIRMWARE_PKG_VERSION:-0.9.5}"
 FW=usr/lib/firmware
 DIT=qcom/sm8475/xiaomi/diting
 
@@ -85,6 +85,8 @@ SQUASH=(
 	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/ipa_fws.mdt:$DIT/ipa_fws.mbn"
 	# Sensor DSP (SLPI), firmware_mnt partition
 	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/slpi.mdt:$DIT/slpi.mbn"
+	# Compute DSP (CDSP: HVX/HTP), firmware_mnt partition
+	"vendor_firmware_mnt.tar:vendor/firmware_mnt/image/cdsp.mdt:$DIT/cdsp.mbn"
 )
 # Directory trees copied as they are: <tar>:<dir in tar>:<target dir>
 TREES=(
@@ -96,6 +98,9 @@ SHARE_TREES=(
 	# ADSP dynamic modules (Fluence ECNS etc.), loaded by the audio PD
 	# through adsprpcd (ADSP_LIBRARY_PATH, see diting-audiopd.service)
 	"vendor_dsp.tar:vendor/dsp/adsp:usr/share/qcom/sm8475/Xiaomi/diting/dsp/adsp"
+	# CDSP process shells (fastrpc_shell_3, fastrpc_shell_unsigned_3) and the
+	# vendor's CDSP libraries, for FastRPC clients (DSP_LIBRARY_PATH)
+	"vendor_dsp.tar:vendor/dsp/cdsp:usr/share/qcom/sm8475/Xiaomi/diting/dsp/cdsp"
 	# factory speaker calibration of this unit (CS35L41 protection firmware,
 	# calibrated resistance per amplifier), see diting-speaker-protection
 	"mnt_vendor_persist.tar:mnt/vendor/persist/audio:usr/share/qcom/sm8475/Xiaomi/diting/audio"
@@ -269,7 +274,8 @@ Description: Xiaomi 12T Pro (diting) device-signed firmware (local build)
  ADSP's dynamic
  audio modules, the voice call topology built from the device's ACDB, the
  factory speaker calibration, and the sensor DSP firmware, modules,
- configuration and factory sensor registry.
+ configuration and factory sensor registry, and the compute DSP firmware
+ and process shells.
  Not redistributable; built locally on or for one phone.
 C
 

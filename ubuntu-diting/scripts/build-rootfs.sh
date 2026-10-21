@@ -46,6 +46,13 @@ fi
 # Optional: phoc with the refresh-rate fix (scripts/build-phoc.sh).
 PHOC_DEBS=("$OUT"/debs/phoc_*diting*_arm64.deb)
 [ -f "${PHOC_DEBS[0]}" ] || { warn "no patched phoc (scripts/build-phoc.sh): refresh-rate switching reverts"; PHOC_DEBS=(); }
+# Optional: phosh that keeps the screen off on automatic wake-ups (scripts/build-phosh.sh)
+PHOSH_DEBS=("$(latest 'phosh_*diting*_arm64.deb')" "$(latest 'phosh-common_*diting*_all.deb')"
+	"$(latest 'libphosh-0.45-0_*diting*_arm64.deb')" "$(latest 'phosh-plugins_*diting*_arm64.deb')"
+	"$(latest 'phosh-mobile-tweaks_*diting*_all.deb')")
+for d in "${PHOSH_DEBS[@]}"; do
+	[ -f "$d" ] || { warn "no patched phosh (scripts/build-phosh.sh): the screen lights up at every wake-up"; PHOSH_DEBS=(); break; }
+done
 # ModemManager with the netlink use-after-free fix (scripts/build-modemmanager.sh)
 MM_DEBS=("$OUT"/debs/modemmanager_*diting*_arm64.deb "$OUT"/debs/libmm-glib0_*diting*_arm64.deb)
 if [ ! -f "${MM_DEBS[0]}" ] || [ ! -f "${MM_DEBS[1]}" ]; then
@@ -205,6 +212,12 @@ phosh-full)
 	;;
 *) die "unknown ROOTFS_DESKTOP '$ROOTFS_DESKTOP' (supported: phosh, phosh-full)" ;;
 esac
+if [ -n "${ROOTFS_DESKTOP:-}" ] && [ ${#PHOSH_DEBS[@]} -gt 0 ]; then
+	ph=()
+	for f in "${PHOSH_DEBS[@]}"; do cp "$f" "$ROOT/tmp/"; ph+=("/tmp/${f##*/}"); done
+	in_root apt-get -y install --allow-downgrades --no-install-recommends "${ph[@]}"
+	rm -f "${ph[@]/#/$ROOT}"
+fi
 
 log "integrity check of all installed files (dpkg --verify)"
 # Only conffiles may differ from the packaged md5sums.

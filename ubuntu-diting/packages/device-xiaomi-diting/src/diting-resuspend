@@ -7,14 +7,20 @@
 # the phone stays awake with the screen off until it is next used.
 #
 # The system-sleep hook runs "diting-resuspend --pre" before suspend (records
-# the power and volume key interrupt counts) and starts this service after
-# resume. The service suspends again unless, within RESUSPEND_DELAY seconds
-# of the resume, a key was pressed or any input device reported an event
-# (touch, keys, headset), something inhibits sleep, or a call is active.
+# the power and volume key interrupt counts) and "--post" right after resume:
+# when no key was pressed it creates /run/diting-resuspend.dark, which tells
+# phosh (patched, see packages/phosh) to keep the screen off. The hook then
+# starts this service, which suspends again unless, within RESUSPEND_DELAY
+# seconds of the resume, a key was pressed, an input device reported an event
+# while the screen was on (touch, keys, headset), something inhibits sleep or
+# a call is active. Input while the screen stays off (a touch in a pocket)
+# does not keep the phone awake.
+
 set -u
 
 DELAY="${RESUSPEND_DELAY:-20}"
 KEYS=/run/diting-resuspend.keys
+DARK=/run/diting-resuspend.dark
 
 key_irqs() {
 	awk '/pmic_pwrkey|pmic_resin/ {
@@ -22,23 +28,53 @@ key_irqs() {
 	} END { print s + 0 }' /proc/interrupts
 }
 
-if [ "${1:-}" = --pre ]; then
-	key_irqs > "$KEYS"
-	exit 0
-fi
+key_pressed() {
+	[ -r "$KEYS" ] && [ "$(key_irqs)" != "$(cat "$KEYS")" ]
+}
 
-# Wait up to DELAY seconds for an event on any input device; 0 = event seen
+case "${1:-}" in
+--pre)
+	rm -f "$DARK"
+	key_irqs > "$KEYS"
+	exit 0 ;;
+--post)
+	if key_pressed; then rm -f "$DARK"; else : > "$DARK"; fi
+	exit 0 ;;
+esac
+
+# Wait up to DELAY seconds for an event on any input device while a display
+# is on; 0 = event seen
 input_seen() {
 	python3 -I -c '
-import os, select, sys
+import glob, os, select, sys, time
+
+def display_on():
+    for p in glob.glob("/sys/class/drm/card*-DSI-*/dpms"):
+        try:
+            if open(p).read().strip() == "On":
+                return True
+        except OSError:
+            pass
+    return False
+
 fds = []
 for p in sys.argv[2:]:
     try:
         fds.append(os.open(p, os.O_RDONLY | os.O_NONBLOCK))
     except OSError:
         pass
-r, _, _ = select.select(fds, [], [], float(sys.argv[1]))
-sys.exit(0 if r else 1)
+end = time.monotonic() + float(sys.argv[1])
+while (left := end - time.monotonic()) > 0:
+    r, _, _ = select.select(fds, [], [], left)
+    for fd in r:
+        try:
+            while os.read(fd, 4096):
+                pass
+        except OSError:
+            pass
+    if r and display_on():
+        sys.exit(0)
+sys.exit(1)
 ' "$1" /dev/input/event*
 }
 
@@ -72,7 +108,7 @@ if input_seen "$DELAY"; then
 	echo "input after resume: staying awake"
 	exit 0
 fi
-if [ -r "$KEYS" ] && [ "$(key_irqs)" != "$(cat "$KEYS")" ]; then
+if key_pressed; then
 	echo "key pressed since suspend: staying awake"
 	exit 0
 fi

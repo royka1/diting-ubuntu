@@ -1,7 +1,8 @@
 # Known issues and risks
 
-State as of 2026-10-15 (kernel 7.2.10-diting r45, device-xiaomi-diting 0.7.15,
-firmware-xiaomi-diting 0.9.4, diting-firmware-setup 0.1.1). Device evidence is
+State as of 2026-10-21 (kernel 7.2.10-diting r46, device-xiaomi-diting 0.7.17,
+firmware-xiaomi-diting 0.9.5, phosh 0.54.0-1diting1, diting-firmware-setup
+0.1.1). Device evidence is
 in `docs/BRINGUP_STATUS.md`.
 
 ## Open, device-confirmed
@@ -85,9 +86,27 @@ in `docs/BRINGUP_STATUS.md`.
   `diting-resuspend` (a system-sleep hook and service) suspends again 20 s
   after a resume unless a key was pressed, any input device reported an
   event, something inhibits sleep, or a call is active. Switch it off with
-  `sudo systemctl mask diting-resuspend.service`. The screen still lights up
-  for those 20 s every 8 minutes. Kernel patch 0093 drops the 0x50 message
-  (it used to complete the ack of a pending battery request).
+  `sudo systemctl mask diting-resuspend.service`. Kernel patch 0093 drops
+  the 0x50 message (it used to complete the ack of a pending battery
+  request); the message still wakes the phone.
+- **Screen lit up at every automatic wake-up** (fixed in device package
+  0.7.16 + patched phosh, `make phosh`): phosh and gnome-settings-daemon
+  turned the screen on at every resume, so it lit up for 20 s every
+  8 minutes. The system-sleep hook now creates `/run/diting-resuspend.dark`
+  when no power or volume key was pressed during suspend; the patched phosh
+  then keeps the outputs off. The power key, an incoming call or a
+  notification that wakes the screen still turn it on. Input while the
+  screen stays off (a touch in a pocket) no longer keeps the phone awake.
+  DEVICE-TESTED 2026-10-21 with an RTC wake: screen off (DSI `dpms` Off)
+  for the whole wake, suspended again after 21 s. Power-key wake from sleep
+  not yet owner-tested. An archive phosh with a higher version replaces the
+  patched one; then the screen lights up again.
+- **SLPI handover messages**: `qcom_q6v5_pas 2400000.remoteproc: Handover
+  signaled, but it already happened` floods the log (rate-limited) in bursts
+  of about 90 s at ~8/s, after boot and after some resumes: the sensor DSP
+  toggles its smp2p ready and handover bits. Sensors keep working. The
+  smp2p sleep state entry that the vendor kernel exports to the SLPI (r46,
+  0095/0096) does not stop it; cause unknown.
 - **Fixed in device package 0.7.10/0.7.11**: calls had no audio since kernel
   r30 (libadsprpc used the system dma-buf heap; the audio PD now uses the
   fastrpc allocator); mobile data was lost after every suspend (ModemManager
@@ -195,6 +214,29 @@ default `deferred_probe_timeout`: GPU SMMU and CCI probes time out and
 the boot hangs in PCIe probing at ~20 s, so the KASAN run needs a longer
 timeout. That KASAN run did find a global out-of-bounds read in
 `qcom_spmi_temp_alarm` (fixed by patch 0082).
+
+### Compute DSP (CDSP) and FastRPC
+
+The CDSP runs since r46 (0094, firmware 0.9.5 with `cdsp.mbn` and the
+vendor's `dsp/cdsp` libraries, including `fastrpc_shell_unsigned_3`).
+libcdsprpc finds the process shells through
+`/usr/share/qcom/conf.d/xiaomi-diting.yaml` (device package 0.7.17), and the
+logged-in user can open `/dev/fastrpc-cdsp` (udev `uaccess`).
+DEVICE-TESTED 2026-10-21: Qualcomm's `fastrpc_test -d 3 -U 1 -a v68`
+(calculator, multithreading, HAP memory) passes in an unsigned PD, 3 of 3
+runs. Limits:
+
+- **No dma-buf heap**: when libcdsprpc can open `/dev/dma_heap/system` it
+  allocates its shared buffers there; those are CPU-cached and the fastrpc
+  driver does no cache maintenance on them, so the DSP reads stale data and
+  dynamic loading fails at random ("bad elf magic", "mmap hdrs failed",
+  "lseek failed"). Users without access to the heap (the default; only root
+  and the `fastrpc` group have it) get the driver's own buffers and work.
+  Do not add users to the `fastrpc` group; run root clients with
+  `InaccessiblePaths=/dev/dma_heap` like `diting-audiopd.service`.
+- Only unsigned PDs: signed PDs would need Xiaomi's test signatures.
+- Machine learning on the HTP (Qualcomm AI Engine Direct / QNN, Hexagon
+  v69) not yet tried.
 
 ### Rare early-boot oops while fastrpc probes (seen once)
 

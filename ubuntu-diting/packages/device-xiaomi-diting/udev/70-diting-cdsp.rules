@@ -1,0 +1,8 @@
+# Compute DSP (CDSP) for the logged-in user: FastRPC clients (libcdsprpc,
+# QNN HTP) open /dev/fastrpc-cdsp. 60-fastrpc.rules only grants the fastrpc
+# group. Deliberately no access to /dev/dma_heap/system: libcdsprpc would
+# allocate its shared buffers there, but those are CPU-cached and the
+# fastrpc driver does no cache maintenance on them, so the DSP reads stale
+# data (dynamic loading fails with "bad elf magic"). Without the heap the
+# library uses the fastrpc driver's own buffers, which work.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-cdsp", TAG+="uaccess"
